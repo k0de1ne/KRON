@@ -1,0 +1,15 @@
+name        = "wait_result"
+description = "Wait for an async sub-agent job to finish and return its output. Polls inbox/ until the result file appears."
+timeout_secs = 300
+
+[parameters]
+type     = "object"
+required = ["job_id"]
+
+[parameters.properties.job_id]
+type        = "string"
+description = "Job ID returned by spawn_agent_async"
+
+[parameters.properties.timeout_secs]
+type        = "integer"
+description = "Max seconds to wait (default: 120)"

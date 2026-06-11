@@ -1,0 +1,18 @@
+[package]
+name = "agent"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+tools   = ["dep:tools"]
+hooks   = ["dep:hooks"]
+context = ["dep:context"]
+
+[dependencies]
+proto   = { path = "../proto" }
+tools   = { path = "../tools",   optional = true }
+hooks   = { path = "../hooks",   optional = true }
+context = { path = "../context", optional = true }
+anyhow       = { workspace = true }
+tokio        = { workspace = true }
+futures      = { workspace = true }

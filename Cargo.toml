@@ -1,0 +1,32 @@
+[workspace]
+members = [
+    "src/proto",
+    "src/context",
+    "src/tools",
+    "src/llm",
+    "src/hooks",
+    "src/trigger",
+    "src/agent",
+    "src/session",
+    "src/clients",
+]
+resolver = "2"
+
+[workspace.dependencies]
+tokio        = { version = "1", features = ["full"] }
+serde        = { version = "1", features = ["derive"] }
+serde_json   = "1"
+toml         = "0.8"
+reqwest      = { version = "0.12", features = ["json", "stream"] }
+anyhow       = "1"
+futures      = "0.3"
+clap         = { version = "4", features = ["derive"] }
+chrono       = "0.4"
+async-trait  = "0.1"
+axum         = { version = "0.7" }
+tokio-stream = "0.1"
+tower-http   = { version = "0.5", features = ["fs", "cors"] }
+
+[patch.crates-io]
+memo-map  = { path = "C:/Users/pc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memo-map-0.3.1" }
+minijinja = { path = "C:/Users/pc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/minijinja-2.20.0" }

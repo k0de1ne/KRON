@@ -1,0 +1,10 @@
+[llm]
+provider   = "openai"
+model      = "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf"
+base_url   = "http://localhost:8080"
+max_tokens = 2048
+
+[agent]
+tool_paths   = []
+hooks_dir    = "./extensions/hooks"
+context_file = "./system.md"

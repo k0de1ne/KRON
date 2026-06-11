@@ -1,0 +1,10 @@
+[package]
+name = "context"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow     = { workspace = true }
+chrono     = { workspace = true }
+serde_json = { workspace = true }
+minijinja  = { path = "C:/Users/pc/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/minijinja-2.20.0" }
