@@ -54,15 +54,68 @@ impl Message {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
-    Text { content: String },
-    ToolStart { name: String, args: String },
-    ToolEnd { name: String, output: String },
-    Error { message: String },
+    Text {
+        content: String,
+    },
+    /// The model's thinking (reasoning summaries, DeepSeek reasoning, Gemini thoughts).
+    Reasoning {
+        content: String,
+    },
+    ToolStart {
+        /// The tool call id; `parent` is the spawn_agent call a sub-agent's step belongs to.
+        #[serde(default)]
+        id: String,
+        name: String,
+        args: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
+    },
+    ToolEnd {
+        #[serde(default)]
+        id: String,
+        name: String,
+        output: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
+    },
+    /// The agent waits for the person: approve a tool call, or answer a question.
+    Ask(Ask),
+    Answered {
+        id: String,
+        answer: String,
+    },
+    Error {
+        message: String,
+    },
     Done,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Ask {
+    pub id: String,
+    /// approval | question
+    pub kind: String,
+    /// approval: the tool and its arguments.
+    pub name: String,
+    pub args: String,
+    /// question: what the agent asks, and suggested answers.
+    pub question: String,
+    pub options: Vec<String>,
 }
 
 pub trait Sink: Send + Sync {
     fn emit(&self, event: Event);
+
+    /// Is someone there to answer `ask`?
+    fn can_ask(&self) -> bool {
+        false
+    }
+
+    /// Put a question to the person watching the run. None: nobody can answer.
+    fn ask(&self, _ask: Ask) -> Option<tokio::sync::oneshot::Receiver<String>> {
+        None
+    }
 }
 
 /// CLI sink: answer text to stdout, tool activity to stderr.
@@ -76,18 +129,17 @@ impl Sink for Stdout {
                 print!("{content}");
                 std::io::stdout().flush().ok();
             }
-            Event::ToolStart { name, args } => eprintln!("\n· {name} {}", preview(&args, 300)),
-            Event::ToolEnd { output, .. } => eprintln!("  {}", preview(&output, 300).replace('\n', "\n  ")),
+            Event::ToolStart { name, args, parent, .. } => {
+                eprintln!("\n{}· {name} {}", if parent.is_some() { "  " } else { "" }, preview(&args, 300))
+            }
+            Event::ToolEnd { output, parent, .. } if parent.is_none() => {
+                eprintln!("  {}", preview(&output, 300).replace('\n', "\n  "))
+            }
             Event::Error { message } => eprintln!("\nerror: {message}"),
             Event::Done => println!(),
+            _ => {}
         }
     }
-}
-
-pub struct NullSink;
-
-impl Sink for NullSink {
-    fn emit(&self, _: Event) {}
 }
 
 pub fn preview(s: &str, max: usize) -> String {

@@ -18,6 +18,18 @@ Copyright OpenAI. Licensed under the Apache License, Version 2.0
 (http://www.apache.org/licenses/LICENSE-2.0). Distributed on an "AS IS" basis,
 without warranties or conditions of any kind.
 
+## Web UI libraries
+
+Served by the hub from `src/ui/vendor/`, unmodified (source map comments removed):
+
+- marked 18.1.2 — MIT, https://github.com/markedjs/marked (`marked-18.1.2.js`)
+- DOMPurify 3.4.17 — Apache-2.0 or MPL-2.0, https://github.com/cure53/DOMPurify (`purify-3.4.17.js`)
+- highlight.js 11.12.0 — BSD-3-Clause, https://github.com/highlightjs/highlight.js
+  (`highlight-11.12.0.js`: the common build plus the powershell, dockerfile,
+  nginx and dos grammars)
+
+Icons in `src/ui/index.html` are from Lucide 1.61.0 — ISC, https://lucide.dev.
+
 ## Bundled in kron.apk
 
 `android/proot.sh` puts these Termux builds into the APK unmodified, except

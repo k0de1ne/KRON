@@ -6,12 +6,12 @@ use crate::agent::{Executor, Local, environment};
 use crate::config::Config;
 use crate::store::{Record, Store};
 use crate::turn::{TurnReq, turn};
-use crate::types::{Event, Sink, Tool, new_id};
+use crate::types::{Ask, Event, Sink, Tool, new_id};
 use anyhow::{Context, Result, bail};
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -40,6 +40,9 @@ struct Run {
     tx: broadcast::Sender<Event>,
     abort: Mutex<Option<tokio::task::AbortHandle>>,
     finished: std::sync::atomic::AtomicBool,
+    /// Started from the web UI: approvals and questions go to whoever has the thread open.
+    interactive: bool,
+    asks: Mutex<HashMap<String, oneshot::Sender<String>>>,
 }
 
 impl Sink for Run {
@@ -48,9 +51,31 @@ impl Sink for Run {
         events.push(e.clone());
         self.tx.send(e).ok();
     }
+
+    fn can_ask(&self) -> bool {
+        self.interactive
+    }
+
+    fn ask(&self, ask: Ask) -> Option<oneshot::Receiver<String>> {
+        if !self.interactive {
+            return None;
+        }
+        let (tx, rx) = oneshot::channel();
+        self.asks.lock().unwrap().insert(ask.id.clone(), tx);
+        self.emit(Event::Ask(ask));
+        Some(rx)
+    }
+}
+
+impl Run {
+    fn waiting(&self) -> bool {
+        !self.asks.lock().unwrap().is_empty()
+    }
 }
 
 pub struct Hub {
+    /// ETags of the UI files, so browsers revalidate instead of downloading again.
+    etags: HashMap<&'static str, String>,
     /// Replaced when the config is saved from the web UI.
     cfg: std::sync::RwLock<Arc<Config>>,
     store: Store,
@@ -93,6 +118,7 @@ pub async fn serve(cfg: Arc<Config>, workdir: std::path::PathBuf) -> Result<()> 
         bail!("set [hub] token before listening on {listen}: nodes execute commands for whoever holds it");
     }
     let hub = Arc::new(Hub {
+        etags: ASSETS.iter().map(|(path, _, body)| (*path, etag(body))).collect(),
         store: Store::new(cfg.path("threads")),
         name: cfg.node_name(),
         workdir,
@@ -104,17 +130,32 @@ pub async fn serve(cfg: Arc<Config>, workdir: std::path::PathBuf) -> Result<()> 
         logins: Default::default(),
     });
     let app = Router::new()
-        .route("/", get(|| async { Html(include_str!("ui.html")) }))
+        .route("/", get(|State(hub): State<Shared>, headers: HeaderMap| async move { asset(&hub, "/", &headers) }))
+        .route(
+            "/ui/*file",
+            get(|State(hub): State<Shared>, Path(file): Path<String>, headers: HeaderMap| async move {
+                asset(&hub, &format!("/ui/{file}"), &headers)
+            }),
+        )
         .route("/api/info", get(info))
         .route("/api/threads", get(threads))
         .route("/api/threads/:name", get(thread).delete(delete_thread))
         .route("/api/threads/:name/run", get(thread_run))
         .route("/api/threads/:name/merge", post(merge))
+        .route("/api/threads/:name/meta", get(thread_meta))
+        .route("/api/threads/:name/title", post(rename_thread))
+        .route("/api/threads/:name/fork", post(fork_thread))
         .route("/api/runs", post(start_run))
         .route("/api/runs/:id/events", get(run_events))
         .route("/api/runs/:id/cancel", post(cancel_run))
+        .route("/api/runs/:id/answer", post(answer_run))
+        .route("/api/files", post(files).layer(DefaultBodyLimit::max(48 << 20)))
+        .route("/raw/:token/:node/*path", get(raw_file))
         .route("/manifest.webmanifest", get(manifest))
-        .route("/sw.js", get(|| async { ([("content-type", "text/javascript")], SW_JS) }))
+        .route(
+            "/sw.js",
+            get(|| async { ([("content-type", "text/javascript"), ("cache-control", "no-cache")], SW_JS) }),
+        )
         .route("/icon.svg", get(|| async { ([("content-type", "image/svg+xml")], ICON_SVG) }))
         .route(
             "/icon-192.png",
@@ -206,20 +247,108 @@ async fn info(State(hub): State<Shared>, headers: HeaderMap, Query(q): Query<Tok
             json!({"name": n, "kind": p.kind, "model": p.model, "oauth": oauth, "logged_in": logged_in})
         })
         .collect();
+    let agents: Vec<Value> = cfg
+        .agents
+        .iter()
+        .map(|(n, a)| {
+            let about = a.system.as_deref().and_then(|t| t.lines().next()).unwrap_or("");
+            json!({"name": n, "provider": a.provider, "model": a.model, "tools": a.tools,
+                "about": crate::types::preview(about, 140)})
+        })
+        .collect();
     Json(json!({
         "hub": hub.name,
+        "version": env!("CARGO_PKG_VERSION"),
         "default": cfg.default_provider().ok(),
+        "search": cfg.search_provider(),
         "nodes": hub.online_nodes(),
         "providers": providers,
-        "agents": cfg.agents.keys().collect::<Vec<_>>(),
+        "agents": agents,
         "sites": cfg.sites.keys().collect::<Vec<_>>(),
     }))
     .into_response()
 }
 
-async fn threads(State(hub): State<Shared>, headers: HeaderMap, Query(q): Query<TokenQuery>) -> Response {
+#[derive(Deserialize, Default)]
+struct ThreadsQuery {
+    token: Option<String>,
+    /// Full-text search.
+    q: Option<String>,
+}
+
+/// Threads, newest first, with what is happening in them right now.
+async fn threads(State(hub): State<Shared>, headers: HeaderMap, Query(tq): Query<ThreadsQuery>) -> Response {
+    guard!(hub, headers, TokenQuery { token: tq.token.clone() });
+    let (running, waiting) = {
+        let runs = hub.runs.lock().unwrap();
+        let live: Vec<_> = runs.values().filter(|r| !r.finished.load(std::sync::atomic::Ordering::Relaxed)).collect();
+        let running: std::collections::HashSet<String> = live.iter().map(|r| r.thread.clone()).collect();
+        let waiting: std::collections::HashSet<String> =
+            live.iter().filter(|r| r.waiting()).map(|r| r.thread.clone()).collect();
+        (running, waiting)
+    };
+    let hits: Option<HashMap<String, String>> =
+        tq.q.as_deref().map(str::trim).filter(|q| !q.is_empty()).map(|q| hub.store.search(q).into_iter().collect());
+    let list: Vec<Value> = hub
+        .store
+        .list()
+        .into_iter()
+        .filter(|t| hits.as_ref().is_none_or(|h| h.contains_key(&t.name)))
+        .map(|t| {
+            let mut v = json!(t);
+            v["running"] = json!(running.contains(&t.name));
+            v["waiting"] = json!(waiting.contains(&t.name));
+            if let Some(snippet) = hits.as_ref().and_then(|h| h.get(&t.name)) {
+                v["snippet"] = json!(snippet);
+            }
+            v
+        })
+        .collect();
+    Json(list).into_response()
+}
+
+async fn thread_meta(
+    State(hub): State<Shared>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
     guard!(hub, headers, q);
-    Json(hub.store.list()).into_response()
+    if let Err(e) = crate::store::valid_name(&name) {
+        return err(e);
+    }
+    Json(hub.store.meta(&name)).into_response()
+}
+
+async fn rename_thread(
+    State(hub): State<Shared>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    Json(body): Json<Value>,
+) -> Response {
+    guard!(hub, headers, q);
+    let title: String = body["title"].as_str().unwrap_or("").trim().chars().take(120).collect();
+    match hub.store.set_meta(&name, "title", json!(title)) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err(e),
+    }
+}
+
+/// Branch a thread: a new one with its first `upto` records (edit a message, retry an answer).
+async fn fork_thread(
+    State(hub): State<Shared>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    Json(body): Json<Value>,
+) -> Response {
+    guard!(hub, headers, q);
+    let upto = body["upto"].as_u64().unwrap_or(u64::MAX) as usize;
+    match hub.store.fork(&name, upto) {
+        Ok(thread) => Json(json!({"thread": thread})).into_response(),
+        Err(e) => err(e),
+    }
 }
 
 async fn thread(
@@ -417,14 +546,18 @@ async fn start_run(
     if let Err(e) = crate::store::valid_name(&req.thread) {
         return err(e);
     }
-    let exec: Arc<dyn Executor> = match req.node.as_deref() {
-        None | Some("") => Arc::new(Local::new(&hub.cfg(), hub.workdir.clone())),
-        Some(n) if n == hub.name => Arc::new(Local::new(&hub.cfg(), hub.workdir.clone())),
-        Some(n) => match Remote::connect(&hub, n) {
-            Ok(r) => Arc::new(r),
-            Err(e) => return err(e),
-        },
+    let exec = match hub.executor(req.node.as_deref(), req.cwd.as_deref(), req.mode != "chat").await {
+        Ok(e) => e,
+        Err(e) => return err(e),
     };
+    // Reopening the thread later restores these choices.
+    let settings = json!({
+        "mode": req.mode, "provider": req.provider, "agent": req.agent, "site": req.site, "node": req.node,
+        "cwd": req.cwd, "model": req.model, "effort": req.effort, "access": req.access,
+    });
+    if let Err(e) = hub.store.set_meta(&req.thread, "settings", settings) {
+        return err(e);
+    }
     let id = new_id();
     let (tx, _) = broadcast::channel(4096);
     let run = Arc::new(Run {
@@ -434,6 +567,8 @@ async fn start_run(
         tx,
         abort: Mutex::new(None),
         finished: Default::default(),
+        interactive: req.interactive,
+        asks: Default::default(),
     });
     hub.runs.lock().unwrap().insert(id.clone(), run.clone());
 
@@ -474,6 +609,28 @@ async fn cancel_run(
     if let Some(h) = run.and_then(|r| r.abort.lock().unwrap().take()) {
         h.abort();
     }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// The person's answer to an approval or a question from the agent.
+async fn answer_run(
+    State(hub): State<Shared>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    Json(body): Json<Value>,
+) -> Response {
+    guard!(hub, headers, q);
+    let Some(run) = hub.runs.lock().unwrap().get(&id).cloned() else {
+        return (StatusCode::NOT_FOUND, "no such run").into_response();
+    };
+    let ask = body["ask"].as_str().unwrap_or("").to_string();
+    let answer = body["answer"].as_str().unwrap_or("").to_string();
+    let Some(tx) = run.asks.lock().unwrap().remove(&ask) else {
+        return (StatusCode::CONFLICT, "already answered").into_response();
+    };
+    tx.send(answer.clone()).ok();
+    run.emit(Event::Answered { id: ask, answer });
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -519,10 +676,22 @@ async fn manifest() -> Response {
     ([("content-type", "application/manifest+json")], m.to_string()).into_response()
 }
 
-/// Lets the web UI install as an app (Android / desktop Chrome). Never caches the API.
-const SW_JS: &str = "self.addEventListener('install', () => self.skipWaiting());\n\
-self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));\n\
-self.addEventListener('fetch', () => {});\n";
+/// Lets the web UI install as an app (Android / desktop Chrome) and open without
+/// a connection: the page and its files come from the network when possible,
+/// from the last copy otherwise. Never caches the API.
+const SW_JS: &str = r#"const CACHE = 'kron-ui';
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
+self.addEventListener('fetch', e => {
+  const url = new URL(e.request.url);
+  if (e.request.method !== 'GET' || url.origin !== location.origin) return;
+  if (url.pathname !== '/' && !url.pathname.startsWith('/ui/') && !url.pathname.startsWith('/icon')) return;
+  e.respondWith(fetch(e.request).then(r => {
+    if (r.ok) { const copy = r.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); }
+    return r;
+  }).catch(() => caches.match(e.request, {ignoreSearch: true})));
+});
+"#;
 
 pub const ICON_SVG: &str = include_str!("assets/icon.svg");
 
@@ -567,6 +736,144 @@ async fn run_events(
         Some((Ok::<_, std::convert::Infallible>(SseEvent::default().data(serde_json::to_string(&e).unwrap())), out))
     });
     Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+}
+
+// ── Files on nodes ───────────────────────────────────────────────────────────
+
+impl Hub {
+    /// Where a run (or a file request) executes: this machine or a connected node,
+    /// in `cwd` if given. `with_env` fetches the agent's environment from a remote node.
+    async fn executor(
+        self: &Arc<Self>,
+        node: Option<&str>,
+        cwd: Option<&str>,
+        with_env: bool,
+    ) -> Result<Arc<dyn Executor>> {
+        let cwd = cwd.filter(|c| !c.trim().is_empty());
+        match node {
+            None | Some("") => {}
+            Some(n) if n == self.name => {}
+            Some(n) => {
+                let mut r = Remote::connect(self, n)?;
+                r.cwd = cwd.map(String::from);
+                if with_env && r.cwd.is_some() {
+                    // Older nodes don't know "env": they keep their own environment text.
+                    if let Ok(v) = r.job(json!({"kind": "env"}), Duration::from_secs(15)).await {
+                        r.env = v["output"].as_str().map(String::from);
+                    }
+                }
+                return Ok(Arc::new(r));
+            }
+        }
+        let dir = match cwd {
+            Some(c) => crate::files::resolve(&self.workdir, c),
+            None => self.workdir.clone(),
+        };
+        if !dir.is_dir() {
+            bail!("folder {} does not exist", crate::files::shown(&dir));
+        }
+        Ok(Arc::new(Local::new(&self.cfg(), dir)))
+    }
+}
+
+/// {node, cwd, op, path, data}: list / read / write / mkdir / stat on a node.
+async fn files(
+    State(hub): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    Json(body): Json<Value>,
+) -> Response {
+    guard!(hub, headers, q);
+    let exec = match hub.executor(body["node"].as_str(), body["cwd"].as_str(), false).await {
+        Ok(e) => e,
+        Err(e) => return err(format!("{e:#}")),
+    };
+    match exec.files(&body).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// A file from a node as a web page would load it: open an HTML file the agent
+/// made and its CSS, scripts and images load too. The token is part of the path
+/// so relative links keep it; pages are sandboxed away from the hub's origin.
+async fn raw_file(State(hub): State<Shared>, Path((token, node, path)): Path<(String, String, String)>) -> Response {
+    let expected = hub.cfg().hub.token.clone().filter(|t| !t.is_empty());
+    if expected.is_some_and(|t| t != token) {
+        return (StatusCode::UNAUTHORIZED, "bad or missing token").into_response();
+    }
+    let windows_abs = path.len() > 1 && path.as_bytes()[1] == b':';
+    let mut path = if windows_abs { path } else { format!("/{path}") };
+    let exec = match hub.executor(Some(&node), None, false).await {
+        Ok(e) => e,
+        Err(e) => return (StatusCode::NOT_FOUND, format!("{e:#}")).into_response(),
+    };
+    if let Ok(st) = exec.files(&json!({"op": "stat", "path": path})).await
+        && st["dir"] == true
+    {
+        path = format!("{}/index.html", path.trim_end_matches('/'));
+    }
+    match exec.files(&json!({"op": "read", "path": path})).await {
+        Ok(v) => {
+            use base64::Engine;
+            let bytes =
+                base64::engine::general_purpose::STANDARD.decode(v["data"].as_str().unwrap_or("")).unwrap_or_default();
+            let kind = crate::files::mime(&path);
+            // Documents get an opaque origin: the page cannot reach the hub's storage or API.
+            // (PDF, images and media stay unsandboxed so the browser's viewers work.)
+            let document = kind.contains("html") || kind.contains("svg") || kind.contains("xml");
+            let csp = if document {
+                "sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads"
+            } else {
+                "default-src 'none'"
+            };
+            (
+                [
+                    ("content-type", kind),
+                    ("cache-control", "no-store"),
+                    ("x-content-type-options", "nosniff"),
+                    ("content-security-policy", csp),
+                ],
+                bytes,
+            )
+                .into_response()
+        }
+        Err(e) => (StatusCode::NOT_FOUND, format!("{e:#}")).into_response(),
+    }
+}
+
+// ── Web UI files ─────────────────────────────────────────────────────────────
+
+/// (path, content type, body). Vendor files carry their version in the name.
+const ASSETS: &[(&str, &str, &str)] = &[
+    ("/", "text/html; charset=utf-8", include_str!("ui/index.html")),
+    ("/ui/app.css", "text/css; charset=utf-8", include_str!("ui/app.css")),
+    ("/ui/app.js", "text/javascript; charset=utf-8", include_str!("ui/app.js")),
+    ("/ui/vendor/marked-18.1.2.js", "text/javascript; charset=utf-8", include_str!("ui/vendor/marked-18.1.2.js")),
+    ("/ui/vendor/purify-3.4.17.js", "text/javascript; charset=utf-8", include_str!("ui/vendor/purify-3.4.17.js")),
+    (
+        "/ui/vendor/highlight-11.12.0.js",
+        "text/javascript; charset=utf-8",
+        include_str!("ui/vendor/highlight-11.12.0.js"),
+    ),
+];
+
+fn etag(body: &str) -> String {
+    use sha2::Digest;
+    let h = sha2::Sha256::digest(body.as_bytes());
+    format!("\"{}\"", h.iter().take(8).map(|b| format!("{b:02x}")).collect::<String>())
+}
+
+fn asset(hub: &Hub, path: &str, headers: &HeaderMap) -> Response {
+    let Some((_, kind, body)) = ASSETS.iter().find(|(p, _, _)| *p == path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let tag = hub.etags.get(path).cloned().unwrap_or_default();
+    let cache = if path.starts_with("/ui/vendor/") { "public, max-age=31536000, immutable" } else { "no-cache" };
+    if headers.get("if-none-match").and_then(|v| v.to_str().ok()) == Some(tag.as_str()) {
+        return (StatusCode::NOT_MODIFIED, [("etag", tag)]).into_response();
+    }
+    ([("content-type", kind.to_string()), ("cache-control", cache.to_string()), ("etag", tag)], *body).into_response()
 }
 
 // ── Nodes ─────────────────────────────────────────────────────────────────────
@@ -639,6 +946,10 @@ struct Remote {
     hub: Arc<Hub>,
     node: String,
     info: Value,
+    /// The thread's working folder there (None: the node's own).
+    cwd: Option<String>,
+    /// The environment text for `cwd`, asked from the node.
+    env: Option<String>,
 }
 
 impl Remote {
@@ -646,7 +957,7 @@ impl Remote {
         let nodes = hub.nodes.lock().unwrap();
         match nodes.get(node) {
             Some(n) if n.last_seen.elapsed() < NODE_TTL => {
-                Ok(Remote { hub: hub.clone(), node: node.to_string(), info: n.info.clone() })
+                Ok(Remote { hub: hub.clone(), node: node.to_string(), info: n.info.clone(), cwd: None, env: None })
             }
             _ => bail!("node '{node}' is not connected"),
         }
@@ -655,6 +966,9 @@ impl Remote {
     async fn job(&self, mut job: Value, timeout: Duration) -> Result<Value> {
         let id = new_id();
         job["id"] = json!(id);
+        if let Some(c) = &self.cwd {
+            job["cwd"] = json!(c);
+        }
         let (tx, rx) = oneshot::channel();
         self.hub.pending.lock().unwrap().insert(id.clone(), tx);
         {
@@ -690,6 +1004,9 @@ impl Executor for Remote {
     }
 
     fn environment(&self) -> String {
+        if let Some(env) = &self.env {
+            return env.clone();
+        }
         self.info["environment"]
             .as_str()
             .map(String::from)
@@ -701,5 +1018,10 @@ impl Executor for Remote {
             .job(json!({"kind": "web", "site": site, "prompt": prompt, "url": url}), Duration::from_secs(900))
             .await?;
         Ok((v["output"].as_str().unwrap_or("").into(), v["url"].as_str().unwrap_or("").into()))
+    }
+
+    async fn files(&self, req: &Value) -> Result<Value> {
+        let v = self.job(json!({"kind": "files", "req": req}), Duration::from_secs(120)).await?;
+        Ok(v["output"].clone())
     }
 }

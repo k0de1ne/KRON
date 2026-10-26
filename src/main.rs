@@ -2,6 +2,7 @@ mod agent;
 mod auth;
 mod browser;
 mod config;
+mod files;
 mod hub;
 mod llm;
 mod local;
@@ -61,6 +62,9 @@ struct RunArgs {
     /// Run tools / the browser on this node (via the hub)
     #[arg(long, value_name = "NODE")]
     on: Option<String>,
+    /// The agent may look (read files, search) but not run commands or edit
+    #[arg(long)]
+    read_only: bool,
 }
 
 #[derive(Subcommand)]
@@ -268,7 +272,8 @@ async fn run(cfg: Arc<Config>, store: Store, hub: Option<node::Client>, args: Ru
         model: args.model.clone(),
         node: args.on.clone(),
         site: args.web.clone(),
-        text: String::new(),
+        access: if args.read_only { "read".into() } else { String::new() },
+        ..Default::default()
     };
     if req.node.is_some() && hub.is_none() {
         bail!("--on needs a hub: set [hub] url in config");

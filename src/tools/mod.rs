@@ -8,9 +8,23 @@ use std::path::{Path, PathBuf};
 pub mod apply_patch;
 pub mod fs;
 pub mod shell;
+pub mod web;
 
 /// Tools handled by the agent loop itself rather than on the machine running the tools.
-pub const AGENT_SIDE: &[&str] = &["web_search", "update_plan", "spawn_agent"];
+pub const AGENT_SIDE: &[&str] = &["web_search", "web_fetch", "update_plan", "spawn_agent", "ask_user"];
+
+/// Tools that only look: all an agent gets in read-only mode.
+pub const READ_ONLY: &[&str] =
+    &["read_file", "list_dir", "grep_files", "web_search", "web_fetch", "update_plan", "spawn_agent", "ask_user"];
+
+/// Does this call change something on the machine (and so need approval in "ask" mode)?
+pub fn changes_things(name: &str, args: &Value) -> bool {
+    match name {
+        // Typing into a running session is as good as running a command; polling is not.
+        "write_stdin" => args["chars"].as_str().is_some_and(|c| !c.is_empty()),
+        n => !READ_ONLY.contains(&n),
+    }
+}
 
 #[derive(Clone)]
 pub struct Ctx {
@@ -131,6 +145,24 @@ pub fn builtin() -> Vec<Tool> {
             "web_search",
             "Searches the web with the model provider's native search and returns a sourced answer.",
             json!({"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}}}),
+        ),
+        tool(
+            "web_fetch",
+            "Fetches a web page (or any text URL) and returns its readable text with links. Use it to read pages \
+            found with web_search or given by the user.",
+            json!({"type": "object", "required": ["url"], "properties": {
+                "url": {"type": "string", "description": "http(s) URL"},
+                "offset": {"type": "number", "description": "Character to start from, for long pages (default 0)."},
+                "max_chars": {"type": "number", "description": "How much text to return (default 20000)."}}}),
+        ),
+        tool(
+            "ask_user",
+            "Asks the user a question and waits for the answer. Use it only when you cannot continue without a \
+            decision from the user (an ambiguous requirement, a choice between approaches, missing credentials). \
+            Offer short options when the answer is a choice.",
+            json!({"type": "object", "required": ["question"], "properties": {
+                "question": {"type": "string", "description": "The question, in the user's language."},
+                "options": {"type": "array", "items": {"type": "string"}, "description": "Suggested answers (2-5), optional."}}}),
         ),
         tool(
             "spawn_agent",

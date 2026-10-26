@@ -28,6 +28,9 @@ pub struct ThreadInfo {
     pub updated: i64,
     pub messages: usize,
     pub title: String,
+    /// The thread this one was branched from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<String>,
 }
 
 #[derive(Clone)]
@@ -101,17 +104,66 @@ impl Store {
             }
             let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
             let Ok(recs) = self.load(&name) else { continue };
-            let title = recs
-                .iter()
-                .find_map(|r| match &r.msg {
-                    Message::User { content } => Some(crate::types::preview(content, 80)),
-                    _ => None,
+            let meta = self.meta(&name);
+            let title = meta["title"]
+                .as_str()
+                .filter(|t| !t.is_empty())
+                .map(String::from)
+                .or_else(|| {
+                    recs.iter().find_map(|r| match &r.msg {
+                        Message::User { content } => Some(crate::types::preview(content, 80)),
+                        _ => None,
+                    })
                 })
                 .unwrap_or_default();
-            out.push(ThreadInfo { updated: recs.last().map(|r| r.ts).unwrap_or(0), messages: recs.len(), name, title });
+            out.push(ThreadInfo {
+                updated: recs.last().map(|r| r.ts).unwrap_or(0),
+                messages: recs.len(),
+                forked_from: meta["forked_from"].as_str().map(String::from),
+                name,
+                title,
+            });
         }
         out.sort_by_key(|t| std::cmp::Reverse(t.updated));
         out
+    }
+
+    /// Threads whose messages contain `q` (case-insensitive), with a snippet around the match.
+    pub fn search(&self, q: &str) -> Vec<(String, String)> {
+        let q = q.to_lowercase();
+        let mut out = Vec::new();
+        for t in self.list() {
+            let found = self.load(&t.name).unwrap_or_default().into_iter().find_map(|r| {
+                let text = match r.msg {
+                    Message::User { content } => content,
+                    Message::Assistant { text: Some(t), .. } => t,
+                    _ => return None,
+                };
+                let lower = text.to_lowercase();
+                let at = lower.find(&q)?;
+                // Byte offsets of the lowercased text may differ; count chars instead.
+                let start = lower[..at].chars().count().saturating_sub(40);
+                let snippet: String = text.chars().skip(start).take(120).collect();
+                Some(snippet.split_whitespace().collect::<Vec<_>>().join(" "))
+            });
+            if let Some(s) = found.or_else(|| t.title.to_lowercase().contains(&q).then(String::new)) {
+                out.push((t.name, s));
+            }
+        }
+        out
+    }
+
+    /// A new thread with the first `upto` records of this one.
+    pub fn fork(&self, name: &str, upto: usize) -> Result<String> {
+        let recs = self.load(name)?;
+        let new = new_thread_name();
+        let text: String = recs.iter().take(upto).map(|r| serde_json::to_string(r).unwrap() + "\n").collect();
+        std::fs::write(self.file(&new), text)?;
+        let mut meta = self.meta(name);
+        meta["forked_from"] = Value::String(name.to_string());
+        meta.as_object_mut().map(|m| m.remove("web"));
+        std::fs::write(self.dir.join(format!("{new}.meta.json")), serde_json::to_string_pretty(&meta)?)?;
+        Ok(new)
     }
 
     pub fn delete(&self, name: &str) -> Result<()> {
@@ -189,6 +241,21 @@ mod tests {
         let ids = |s: &Store| s.load("t").unwrap().into_iter().map(|r| r.id).collect::<Vec<_>>();
         assert_eq!(ids(&a), ids(&b));
         assert_eq!(ids(&a).len(), 3);
+    }
+
+    #[test]
+    fn fork_and_search() {
+        let s = Store::new(std::env::temp_dir().join(format!("kron-f-{}", new_id())));
+        s.append("t", &Message::user("Привет, Мир")).unwrap();
+        s.append("t", &Message::assistant("answer")).unwrap();
+        s.set_meta("t", "title", serde_json::json!("named")).unwrap();
+        let f = s.fork("t", 1).unwrap();
+        assert_eq!(s.load(&f).unwrap().len(), 1);
+        assert_eq!(s.meta(&f)["forked_from"], "t");
+        let hits = s.search("мир");
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|(_, snip)| snip.contains("Мир")));
+        assert!(s.list().iter().any(|t| t.title == "named"));
     }
 
     #[test]

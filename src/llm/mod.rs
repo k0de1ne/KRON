@@ -43,9 +43,17 @@ pub trait Provider: Send + Sync {
 }
 
 pub fn build(cfg: &Config, name: &str, model: Option<&str>) -> Result<Arc<dyn Provider>> {
+    build_with(cfg, name, model, None)
+}
+
+/// `effort` overrides the provider's reasoning effort (Responses / Codex).
+pub fn build_with(cfg: &Config, name: &str, model: Option<&str>, effort: Option<&str>) -> Result<Arc<dyn Provider>> {
     let mut p: ProviderCfg = cfg.provider(name)?.clone();
-    if let Some(m) = model {
+    if let Some(m) = model.filter(|m| !m.is_empty()) {
         p.model = m.to_string();
+    }
+    if let Some(e) = effort.filter(|e| !e.is_empty()) {
+        p.reasoning_effort = Some(e.to_string());
     }
     let auth = |kind: &str| Auth::new(cfg, name, kind, &p);
     Ok(match p.kind.as_str() {

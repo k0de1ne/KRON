@@ -156,6 +156,9 @@ impl Provider for Anthropic {
                         sink.emit(Event::Text { content: t.to_string() });
                         text.push_str(t);
                     }
+                    if let Some(t) = d["thinking"].as_str() {
+                        sink.emit(Event::Reasoning { content: t.to_string() });
+                    }
                     if let (Some(j), Some(b)) = (d["partial_json"].as_str(), blocks.get_mut(idx)) {
                         b.3.push_str(j);
                     }

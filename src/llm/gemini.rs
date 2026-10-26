@@ -186,6 +186,7 @@ impl Provider for Gemini {
         let resp = self.call("streamGenerateContent?alt=sse", &body).await?;
 
         let mut text = String::new();
+        let mut thoughts = String::new();
         let mut tool_calls = Vec::new();
         sse(resp, |_, data| {
             let Ok(v) = serde_json::from_str::<Value>(data) else { return Ok(()) };
@@ -201,15 +202,21 @@ impl Provider for Gemini {
                         arguments: fc.get("args").cloned().unwrap_or(json!({})),
                         meta: part.get("thoughtSignature").cloned(),
                     });
-                } else if let (Some(t), false) = (part["text"].as_str(), part["thought"] == true) {
-                    sink.emit(Event::Text { content: t.to_string() });
-                    text.push_str(t);
+                } else if let Some(t) = part["text"].as_str() {
+                    if part["thought"] == true {
+                        sink.emit(Event::Reasoning { content: t.to_string() });
+                        thoughts.push_str(t);
+                    } else {
+                        sink.emit(Event::Text { content: t.to_string() });
+                        text.push_str(t);
+                    }
                 }
             }
             Ok(())
         })
         .await?;
-        Ok(Response { text: Some(text).filter(|t| !t.is_empty()), tool_calls, reasoning: None })
+        let reasoning = Some(thoughts).filter(|t| !t.is_empty());
+        Ok(Response { text: Some(text).filter(|t| !t.is_empty()), tool_calls, reasoning })
     }
 
     fn has_web_search(&self) -> bool {
