@@ -2,12 +2,12 @@
 //! credentials, runs the agent loops, serves the web UI, and sends tool calls
 //! and web chats to whichever node (PC, phone, server) should execute them.
 
-use crate::agent::{environment, Executor, Local};
+use crate::agent::{Executor, Local, environment};
 use crate::config::Config;
 use crate::store::{Record, Store};
-use crate::turn::{turn, TurnReq};
-use crate::types::{new_id, Event, Sink, Tool};
-use anyhow::{bail, Result};
+use crate::turn::{TurnReq, turn};
+use crate::types::{Event, Sink, Tool, new_id};
+use anyhow::{Result, bail};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -15,11 +15,11 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, oneshot, Notify};
+use tokio::sync::{Notify, broadcast, oneshot};
 
 const POLL_WAIT: Duration = Duration::from_secs(25);
 const NODE_TTL: Duration = Duration::from_secs(60);
@@ -32,8 +32,14 @@ struct Node {
 }
 
 struct Run {
+    thread: String,
+    /// Records the thread had (including this turn's user message) when the run started:
+    /// a client that attaches later shows those, then replays the events.
+    base: usize,
     events: Mutex<Vec<Event>>,
     tx: broadcast::Sender<Event>,
+    abort: Mutex<Option<tokio::task::AbortHandle>>,
+    finished: std::sync::atomic::AtomicBool,
 }
 
 impl Sink for Run {
@@ -77,10 +83,23 @@ pub async fn serve(cfg: Arc<Config>, workdir: std::path::PathBuf) -> Result<()> 
         .route("/", get(|| async { Html(include_str!("ui.html")) }))
         .route("/api/info", get(info))
         .route("/api/threads", get(threads))
-        .route("/api/threads/:name", get(thread))
+        .route("/api/threads/:name", get(thread).delete(delete_thread))
+        .route("/api/threads/:name/run", get(thread_run))
         .route("/api/threads/:name/merge", post(merge))
         .route("/api/runs", post(start_run))
         .route("/api/runs/:id/events", get(run_events))
+        .route("/api/runs/:id/cancel", post(cancel_run))
+        .route("/manifest.webmanifest", get(manifest))
+        .route("/sw.js", get(|| async { ([("content-type", "text/javascript")], SW_JS) }))
+        .route("/icon.svg", get(|| async { ([("content-type", "image/svg+xml")], ICON_SVG) }))
+        .route(
+            "/icon-192.png",
+            get(|| async { ([("content-type", "image/png")], &include_bytes!("assets/icon-192.png")[..]) }),
+        )
+        .route(
+            "/icon-512.png",
+            get(|| async { ([("content-type", "image/png")], &include_bytes!("assets/icon-512.png")[..]) }),
+        )
         .route("/api/nodes/:name/hello", post(node_hello))
         .route("/api/nodes/:name/poll", get(node_poll))
         .route("/api/nodes/:name/result", post(node_result))
@@ -215,21 +234,34 @@ async fn start_run(
     };
     let id = new_id();
     let (tx, _) = broadcast::channel(4096);
-    let run = Arc::new(Run { events: Mutex::new(Vec::new()), tx });
+    let run = Arc::new(Run {
+        thread: req.thread.clone(),
+        base: hub.store.load(&req.thread).map(|r| r.len()).unwrap_or(0) + 1,
+        events: Mutex::new(Vec::new()),
+        tx,
+        abort: Mutex::new(None),
+        finished: Default::default(),
+    });
     hub.runs.lock().unwrap().insert(id.clone(), run.clone());
 
     let thread = req.thread.clone();
     let hub2 = hub.clone();
     let run_id = id.clone();
-    tokio::spawn(async move {
+    let run2 = run.clone();
+    let work = tokio::spawn(async move {
         let lock = hub2.thread_locks.lock().unwrap().entry(req.thread.clone()).or_default().clone();
-        let result = {
-            let _one_turn_at_a_time = lock.lock().await;
-            turn(&hub2.cfg, &hub2.store, &req, exec, run.as_ref()).await
-        };
+        let _one_turn_at_a_time = lock.lock().await;
+        turn(&hub2.cfg, &hub2.store, &req, exec, run2.as_ref()).await
+    });
+    *run.abort.lock().unwrap() = Some(work.abort_handle());
+    let hub2 = hub.clone();
+    tokio::spawn(async move {
+        let result = work.await;
+        run.finished.store(true, std::sync::atomic::Ordering::Relaxed);
         match result {
-            Ok(()) => run.emit(Event::Done),
-            Err(e) => run.emit(Event::Error { message: format!("{e:#}") }),
+            Ok(Ok(())) => run.emit(Event::Done),
+            Ok(Err(e)) => run.emit(Event::Error { message: format!("{e:#}") }),
+            Err(_) => run.emit(Event::Error { message: "stopped".into() }),
         }
         // Keep finished runs around briefly for late subscribers.
         tokio::time::sleep(Duration::from_secs(300)).await;
@@ -237,6 +269,69 @@ async fn start_run(
     });
     Json(json!({"run": id, "thread": thread})).into_response()
 }
+
+async fn cancel_run(
+    State(hub): State<Shared>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    guard!(hub, headers, q);
+    let run = hub.runs.lock().unwrap().get(&id).cloned();
+    if let Some(h) = run.and_then(|r| r.abort.lock().unwrap().take()) {
+        h.abort();
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// The run currently producing an answer in this thread, if any.
+async fn thread_run(
+    State(hub): State<Shared>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    guard!(hub, headers, q);
+    let runs = hub.runs.lock().unwrap();
+    let active = runs
+        .iter()
+        .find(|(_, r)| r.thread == name && !r.finished.load(std::sync::atomic::Ordering::Relaxed))
+        .map(|(id, r)| json!({"run": id, "base": r.base}));
+    Json(active.unwrap_or(json!({"run": null}))).into_response()
+}
+
+async fn delete_thread(
+    State(hub): State<Shared>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    guard!(hub, headers, q);
+    match hub.store.delete(&name) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err(e),
+    }
+}
+
+async fn manifest() -> Response {
+    let m = json!({
+        "name": "kron", "short_name": "kron", "start_url": "/", "scope": "/", "display": "standalone",
+        "background_color": "#1f1e1d", "theme_color": "#1f1e1d",
+        "icons": [
+            {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+            {"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml"}
+        ]
+    });
+    ([("content-type", "application/manifest+json")], m.to_string()).into_response()
+}
+
+/// Lets the web UI install as an app (Android / desktop Chrome). Never caches the API.
+const SW_JS: &str = "self.addEventListener('install', () => self.skipWaiting());\n\
+self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));\n\
+self.addEventListener('fetch', () => {});\n";
+
+pub const ICON_SVG: &str = include_str!("assets/icon.svg");
 
 async fn run_events(
     State(hub): State<Shared>,

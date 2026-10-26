@@ -1,6 +1,6 @@
 //! read_file, list_dir, grep_files — modelled on the Codex CLI tools.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::path::Path;
 
 pub fn read_file(path: &Path, offset: usize, limit: usize) -> Result<String> {

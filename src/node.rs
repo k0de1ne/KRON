@@ -1,14 +1,14 @@
 //! Talking to the hub: the HTTP client used by the CLI, and the node worker
 //! that executes tool calls and web chats for the hub on this machine.
 
-use crate::agent::{environment, Executor, Local};
+use crate::agent::{Executor, Local, environment};
 use crate::config::Config;
 use crate::llm::{check, http, sse};
 use crate::store::{Record, ThreadInfo};
 use crate::turn::TurnReq;
 use crate::types::{Event, Sink};
-use anyhow::{bail, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, bail};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
 

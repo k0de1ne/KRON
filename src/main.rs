@@ -10,7 +10,7 @@ mod tools;
 mod turn;
 mod types;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use config::Config;
 use std::io::IsTerminal;

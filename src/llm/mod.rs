@@ -5,14 +5,14 @@
 use crate::auth::Auth;
 use crate::config::{Config, ProviderCfg};
 use crate::types::{Message, Sink, Tool, ToolCall};
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use futures::StreamExt;
 use std::sync::{Arc, OnceLock};
 
 pub mod anthropic;
-pub mod codex;
 pub mod gemini;
 pub mod openai;
+pub mod responses;
 
 pub struct Request<'a> {
     pub system: &'a str,
@@ -52,7 +52,8 @@ pub fn build(cfg: &Config, name: &str, model: Option<&str>) -> Result<Arc<dyn Pr
         "openai" => Arc::new(openai::OpenAi::new(&p)),
         "anthropic" => Arc::new(anthropic::Anthropic::with_key(&p)),
         "claude" => Arc::new(anthropic::Anthropic::with_oauth(&p, auth("claude")?)),
-        "codex" => Arc::new(codex::Codex::new(cfg, &p, auth("codex")?)),
+        "responses" => Arc::new(responses::Responses::with_key(&p)),
+        "codex" => Arc::new(responses::Responses::codex(&p, auth("codex")?)),
         "gemini" | "antigravity" => Arc::new(gemini::Gemini::new(&p, auth(&p.kind)?)),
         other => bail!("provider '{name}': unknown kind '{other}'"),
     })
@@ -128,11 +129,7 @@ pub fn with_sources(text: String, sources: &[(String, String)]) -> String {
         .filter(|(_, url)| !url.is_empty() && seen.insert(url.clone()))
         .map(|(title, url)| if title.is_empty() { format!("- {url}") } else { format!("- {title}: {url}") })
         .collect();
-    if list.is_empty() {
-        text
-    } else {
-        format!("{}\n\nSources:\n{}", text.trim_end(), list.join("\n"))
-    }
+    if list.is_empty() { text } else { format!("{}\n\nSources:\n{}", text.trim_end(), list.join("\n")) }
 }
 
 pub const SEARCH_PROMPT: &str = "Search the web and answer the query below. Be concise and factual, \

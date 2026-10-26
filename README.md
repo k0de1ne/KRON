@@ -1,73 +1,129 @@
 # kron
 
-Один харнес для всех ИИ-подписок. Один бинарник для Windows, Linux и Android (Termux).
+Один харнес для всех ИИ-подписок. Один бинарник для Windows, Linux и Android (Termux), управление через обычный чат в браузере или в приложении на телефоне.
 
-- **Агент** с инструментами из Codex CLI: shell, apply_patch, read_file и другие.
-- **Подписки** ChatGPT (Codex), Claude (Claude Code), Gemini (Gemini CLI) и Antigravity через неофициальные адаптеры, вместе с их родными возможностями: например, у каждой свой веб-поиск.
-- **API-ключи**: DeepSeek и всё, что говорит на OpenAI- или Anthropic-API (OpenRouter, llama.cpp, Ollama…).
-- **Обычные чаты** ChatGPT и Gemini в режиме «вопрос — ответ» через браузер. Тратятся лимиты чата, а не агентские.
-- **Синхронизация**: один хаб (сервер или ПК) хранит треды и логины, а агенты выполняют инструменты на любой подключённой машине: ПК, телефоне или сервере. С телефона можно работать через веб-интерфейс хаба.
+- **Чат как в claude.ai.** Форматированные ответы с блоками кода, шаги агента сворачиваются, есть кнопка «стоп» и выбор модели. Чат ставится как приложение на Android и ПК. Открыли тот же чат на другом устройстве — видите ответ, который ещё пишется.
+- **Агент с инструментами Codex CLI.** `apply_patch` взят из исходников Codex как есть, плюс `exec_command`/`write_stdin`, `read_file`, `list_dir`, `grep_files`, `update_plan`. Системный промпт тоже от Codex.
+- **Подписки:**
+  - ChatGPT (Codex), Claude (Claude Code), Gemini (Gemini CLI) и Antigravity — через встроенные адаптеры или через [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI);
+  - у каждой подписки работают её родные возможности, например свой веб-поиск.
+- **API-ключи:** DeepSeek и всё, что говорит на OpenAI-, Responses- или Anthropic-API.
+- **Веб-чаты** ChatGPT и Gemini в режиме «вопрос — ответ» через браузер. Тратятся лимиты чата, а не агентские.
+- **ПК, телефон и сервер связаны.** Хаб хранит чаты и логины, а агенты работают на любой подключённой машине.
+
+## Как это устроено
 
 ```
-kron "почини падающий тест в src/parser"          # агент в текущей папке
-kron --chat -p claude "объясни разницу TCP и UDP"  # просто вопрос-ответ
-kron --web chatgpt "придумай название для кота"    # чат ChatGPT через браузер
-kron --on pc -t deploy "собери релиз"               # агент работает на ПК, команда с телефона
-kron                                                # интерактивный режим
+        телефон (OnePlus) ── чат в приложении ──┐
+        ПК ──────────────── чат / kron в терминале ──┤
+                                                 ▼
+                        hub: kron serve (сервер или ПК)
+                 чаты, логины, циклы агентов, веб-интерфейс
+                       │                   │
+          kron node на ПК            kron node на телефоне
+     (команды, файлы, браузер)        (Termux: команды, файлы)
 ```
+
+Модели вызываются с хаба. Инструменты агента и браузер для веб-чатов работают на выбранной машине: в интерфейсе это переключатель «💻 машина».
 
 ## Установка
 
-**Готовые бинарники** собирает GitHub Actions (`.github/workflows/build.yml`): `kron-x86_64-pc-windows-msvc`, `kron-x86_64-unknown-linux-gnu`, `kron-aarch64-linux-android`.
+**Готовые бинарники** собирает GitHub Actions (`.github/workflows/build.yml`): Windows x64, Linux x64, Android arm64.
 
-**Из исходников** (везде одинаково, OpenSSL не нужен):
+**Из исходников:**
 
 ```bash
 cargo install --path .
 ```
 
-**Android**: в Termux выполните `pkg install rust git`, затем `cargo install --path .`. Либо скопируйте `kron-aarch64-linux-android` в `$PREFIX/bin`. Инструменты агента работают в Termux-шелле.
-
 Затем:
 
 ```bash
-kron init          # пример конфига в ~/.kron/config.toml (или $KRON_HOME)
-kron providers     # кто настроен и залогинен
+kron init        # пример конфига: ~/.kron/config.toml (или $KRON_HOME)
+kron providers   # кто настроен и залогинен
+kron serve       # хаб + чат на http://127.0.0.1:7700
 ```
+
+## Телефон (OnePlus 15 / любой Android)
+
+Есть три варианта, можно комбинировать.
+
+**1. Телефон как экран.** Хаб живёт на сервере или ПК, на телефоне открыт чат. Это самый простой вариант.
+
+- Откройте в Chrome `http://<хаб>:7700/?token=<токен>`, затем в меню «⋮ → Добавить на главный экран».
+- Чтобы чат поставился как полноценное приложение (отдельное окно, иконка), браузер требует HTTPS. Проще всего через Tailscale: на машине с хабом выполните `tailscale serve 7700` и открывайте адрес `https://<машина>.<tailnet>.ts.net`.
+
+**2. Телефон как рабочая машина.** Агенты выполняют команды на самом телефоне.
+
+1. Установите Termux из F-Droid. Версия из Google Play устарела.
+2. `pkg install rust clang git && git clone <repo> && cd KRON && cargo install --path .` Либо скопируйте готовый `kron-aarch64-linux-android` в `$PREFIX/bin/kron`.
+3. В `~/.kron/config.toml` пропишите `[hub] url`, `token`, `node = "phone"`.
+4. Запустите `termux-wake-lock`, затем `kron node --dir ~/storage/shared/Projects`. Перед этим один раз выполните `termux-setup-storage`.
+5. OxygenOS агрессивно усыпляет фон. Поэтому: Настройки → Приложения → Termux → Батарея → **Не ограничивать**. В меню недавних приложений закрепите Termux замком.
+6. Для автозапуска поставьте Termux:Boot и положите скрипт в `~/.termux/boot/kron`:
+   ```sh
+   #!/data/data/com.termux/files/usr/bin/sh
+   termux-wake-lock
+   kron node --dir ~/storage/shared/Projects
+   ```
+
+**3. Телефон как хаб целиком, без сервера.**
+
+1. В Termux выполните `kron serve` (по умолчанию он слушает `127.0.0.1:7700`).
+2. В Chrome откройте `http://localhost:7700`. Для localhost HTTPS не нужен, поэтому чат ставится как приложение.
+3. Логины подписок делайте прямо в Termux командой `kron login …`.
 
 ## Провайдеры
 
-| kind | Что это | Откуда берётся логин | Родные возможности |
+| kind | Что это | Логин / ключ | Родные возможности |
 |---|---|---|---|
-| `codex` | ChatGPT Plus/Pro через бэкенд Codex | `~/.codex/auth.json` или `kron login codex` | web_search |
+| `codex` | ChatGPT Plus/Pro через бэкенд Codex | `~/.codex/auth.json` или `kron login codex` | web_search, freeform `apply_patch` |
 | `claude` | Claude Pro/Max через OAuth Claude Code | `~/.claude/.credentials.json` или `kron login claude` | web_search |
 | `gemini` | Gemini через логин Gemini CLI (Code Assist) | `~/.gemini/oauth_creds.json` или `kron login gemini` | Google Search |
 | `antigravity` | Квота Google Antigravity | `kron login antigravity` | Google Search |
-| `openai` | Любой OpenAI-совместимый API (DeepSeek, OpenRouter, локальные) | `api_key` / `api_key_env` | — |
-| `anthropic` | Anthropic API и совместимые (DeepSeek `/anthropic`) | `api_key` / `api_key_env` | web_search (только api.anthropic.com) |
+| `openai` | OpenAI-совместимый Chat Completions (DeepSeek, OpenRouter, локальные) | `api_key` / `api_key_env` | — |
+| `responses` | OpenAI Responses API (OpenAI, CLIProxyAPI) | `api_key` / `api_key_env` | web_search |
+| `anthropic` | Anthropic Messages API (Anthropic, DeepSeek `/anthropic`, CLIProxyAPI) | `api_key` / `api_key_env` | web_search (Anthropic, CLIProxyAPI) |
 
-Как устроены логины:
+**Встроенные адаптеры подписок** повторяют запросы официальных клиентов. Эндпоинты, параметры OAuth и заголовки сверены с CLIProxyAPI и исходниками gemini-cli.
 
-- Если вы уже вошли в официальный CLI на этой машине, kron использует его файл как есть. Обновлённые токены он записывает обратно в том же формате, поэтому официальный CLI продолжает работать.
-- `kron login <provider>` создаёт отдельный логин в `~/.kron/auth/<provider>.json`. Браузер на той же машине не нужен. Откройте ссылку где угодно, войдите, затем вставьте в терминал адрес, на который вас перенаправило. Если адрес не открылся, это нормально. Так можно залогиниться на сервере по SSH.
-- На macOS Claude Code хранит токены в Keychain, поэтому там используйте `kron login claude`.
-- **Gemini и Antigravity** требуют OAuth-клиент Google (`client_id` / `client_secret`), чтобы обновлять токены и выполнять `kron login`. Это публичные значения из открытых исходников:
-  - Gemini CLI — файл `packages/core/src/code_assist/oauth2.ts`;
-  - Antigravity — проекты-адаптеры вроде `opencode-antigravity-auth`.
+Как работают логины:
 
-  В код они не зашиты: пропишите их в конфиг провайдера. Без них Gemini работает, пока не истечёт токен из `~/.gemini/oauth_creds.json`, а официальный `gemini` сам его обновляет.
+- Если вы уже вошли в официальный CLI на этой машине, kron использует его файл. Обновлённые токены он записывает обратно, так что официальный CLI не ломается.
+- `kron login <provider>` работает и без браузера на машине (например, на сервере по SSH). Откройте ссылку на любом устройстве, войдите, затем вставьте в терминал адрес, на который вас перенаправило.
+- Gemini и Antigravity требуют OAuth-клиент Google (`client_id` / `client_secret`) в конфиге провайдера. Это публичные значения из открытых исходников:
+  - Gemini CLI — `packages/core/src/code_assist/oauth2.ts`;
+  - Antigravity — `internal/auth/antigravity/constants.go` в CLIProxyAPI.
 
-**Веб-поиск.** Инструмент `web_search` всегда выполняет родная модель провайдера, у которого поиск есть. Если текущий провайдер умеет искать сам (Codex, Claude, Gemini), используется он. Иначе, например для DeepSeek, запрос уходит провайдеру из `search = "..."` в конфиге (по умолчанию первому подходящему). DeepSeek-агент может искать через Google Gemini или через ChatGPT.
+**Через CLIProxyAPI.** Сервисы проверяют, что к ним ходит именно официальный клиент: у Claude это десятки заголовков и TLS-отпечаток. Если встроенный адаптер начнёт получать отказы, запустите рядом с хабом CLIProxyAPI. Он поддерживается сообществом и следит за этими изменениями. Залогиньтесь через него:
 
-**DeepSeek** подключается любым из двух способов (оба есть в `kron init`):
+```bash
+cli-proxy-api --claude-login      # или --codex-login, --antigravity-login
+```
+
+Затем направьте провайдера kron на него (примеры есть в `kron init`). Родные инструменты, например веб-поиск, проходят насквозь:
+
+```toml
+[providers.claude]
+kind = "anthropic"
+base_url = "http://127.0.0.1:8317"
+api_key = "<ключ из access.api-keys CLIProxyAPI>"
+model = "claude-opus-5-5"
+```
+
+**Веб-поиск.** Инструмент `web_search` выполняет родная модель провайдера с поиском: та, что ведёт агента, или провайдер из `search = "..."` в конфиге. Так DeepSeek-агент может искать через Gemini или ChatGPT.
+
+**DeepSeek** подключается любым из двух способов:
 
 ```toml
 [providers.deepseek]
 kind = "openai"
 base_url = "https://api.deepseek.com/v1"
-model = "deepseek-chat"          # или deepseek-reasoner
+model = "deepseek-chat"
 api_key_env = "DEEPSEEK_API_KEY"
+```
 
+```toml
 [providers.deepseek-a]
 kind = "anthropic"
 base_url = "https://api.deepseek.com/anthropic"
@@ -75,54 +131,28 @@ model = "deepseek-chat"
 api_key_env = "DEEPSEEK_API_KEY"
 ```
 
-Модели указываются в конфиге (`model = ...`) и разово меняются флагом `-m`.
-
 ## Режимы
 
-- **agent** (по умолчанию): цикл «модель → инструменты → модель», пока задача не решена.
-- **`--chat`**: один ответ модели без инструментов. Это обычный чат, но через API или подписку.
-- **`--web chatgpt|gemini`**: настоящий веб-чат в Chrome, Chromium или Edge с отдельным профилем в `~/.kron/browser`. Один раз выполните `kron browser login chatgpt` (откроется окно, войдите), дальше браузер работает в фоне. Продолжение треда продолжает тот же разговор на сайте. Селекторы сайтов можно переопределить в `[sites.<name>]`, если сайт поменяет вёрстку. Свой сайт добавляется так же.
+В чате режим выбирается в меню модели и переключателем «🛠 Агент». В терминале — флагами:
 
-Треды (`-t name`) хранят историю, и в одном треде можно менять режим и провайдера. Посмотреть историю можно командами `kron threads` и `kron show <thread>`.
+- **Агент** (по умолчанию): модель работает с инструментами на выбранной машине, пока задача не решена.
+- **Чат** (`--chat`, переключатель «Агент» выключен): обычный вопрос — ответ через API или подписку.
+- **Веб-чат** (`--web chatgpt|gemini`, раздел «Веб-чаты» в меню): настоящий сайт в Chrome, Chromium или Edge на машине с браузером. Один раз войдите командой `kron browser login chatgpt`. Продолжение чата в kron продолжает тот же разговор на сайте. Если сайт поменяет вёрстку, селекторы можно переопределить в `[sites.<name>]`.
 
-## Инструменты
+Терминал:
 
-Набор инструментов как в Codex CLI:
-
-| | |
-|---|---|
-| `shell` | команда в шелле пользователя (PowerShell на Windows, `sh` в Linux/Android) |
-| `exec_command` / `write_stdin` | долгие и интерактивные процессы (серверы, REPL) |
-| `apply_patch` | правка файлов в формате патчей Codex (`*** Begin Patch` …) |
-| `read_file`, `list_dir`, `grep_files` | чтение и поиск с учётом `.gitignore` |
-| `update_plan` | план по шагам |
-| `web_search` | родной веб-поиск провайдера |
-| `spawn_agent` | отдать подзадачу другому агенту из конфига (параллельно) |
-
-Свои инструменты кладутся в `~/.kron/tools/`: любой исполняемый скрипт (`.ps1`/`.bat` на Windows). Он получает JSON-аргументы в stdin и отвечает в stdout. Описание и схему можно положить рядом в файл `<имя>.toml` с полями `name`, `description` и `parameters`. Инструкции проекта берутся из `AGENTS.md` (или `CLAUDE.md` / `GEMINI.md`) в рабочей папке.
-
-Агенты — это именованные пресеты:
-
-```toml
-[agents.researcher]
-provider = "gemini"
-tools = ["web_search", "read_file"]   # пусто = все
-system = "Отвечай со ссылками на источники."
+```bash
+kron "почини падающий тест"                     # агент в текущей папке
+kron --chat -p claude "объясни TCP vs UDP"
+kron --web gemini "придумай название для кота"
+kron --on pc -t deploy "собери релиз"          # выполнить на ПК
+kron                                            # интерактивный режим
+kron threads / kron show <чат>
 ```
 
-Запуск: `kron -a researcher "…"`.
+## Синхронизация
 
-## Синхронизация: ПК + телефон + сервер
-
-```
-            ┌──────────── hub (kron serve) ─────────────┐
-            │ треды, логины подписок, циклы агентов, UI │
-            └───────▲───────────────▲───────────────▲───┘
-         kron node  │     kron node │       браузер │ (веб-интерфейс)
-                  ПК (Windows)    телефон (Termux)   телефон / любой
-```
-
-На машине-хабе (сервер или ПК, который обычно включён):
+На хабе:
 
 ```toml
 [hub]
@@ -131,58 +161,43 @@ token  = "длинный-секрет"
 node   = "server"
 ```
 
-```bash
-kron serve
-```
-
 На остальных машинах:
 
 ```toml
 [hub]
 url   = "http://server:7700"
 token = "длинный-секрет"
-node  = "pc"          # или "phone"
+node  = "pc"
 ```
 
-```bash
-kron node --dir ~/projects     # машина принимает работу от агентов
+Дальше `kron node` подключает машину к хабу. Обычный `kron "…"` хранит чат на хабе, а инструменты выполняет у вас. `kron sync` переносит чаты, сделанные офлайн с `--local`.
+
+Токен даёт право выполнять команды на подключённых машинах. Через интернет держите хаб за Tailscale или WireGuard либо за HTTPS-прокси. Без токена хаб слушает только localhost.
+
+## Свои инструменты и агенты
+
+- Скрипт в `~/.kron/tools/` становится инструментом. Он получает JSON в stdin и отвечает в stdout. Описание кладётся рядом в `<имя>.toml`.
+- Инструкции проекта берутся из `AGENTS.md`, `CLAUDE.md` или `GEMINI.md`.
+- Агенты — это пресеты:
+
+```toml
+[agents.researcher]
+provider = "gemini"
+tools = ["web_search", "read_file"]
+system = "Отвечай со ссылками на источники."
 ```
 
-Что это даёт:
-
-- `kron "задача"` на любой машине: тред сохраняется на хабе, а инструменты выполняются здесь, в текущей папке.
-- `kron --on pc "задача"`: агент работает на ПК, даже если команду дали с телефона.
-- `kron --web gemini --on pc "…"`: веб-чат идёт через браузер ПК.
-- `http://server:7700/?token=…` открывает веб-интерфейс с тредами, выбором режима, модели и машины. На телефоне его можно добавить на домашний экран.
-- Логины подписок хранятся только на хабе: залогиньтесь там один раз (`kron login …` по SSH), и все устройства работают через них.
-- `kron sync` объединяет локальные треды (сделанные с `--local`, без сети) с хабом. Треды — это журналы с уникальными id, поэтому они сливаются без конфликтов.
-
-Хаб слушает только HTTP. Токен даёт право выполнять команды на подключённых машинах. Через интернет держите его за Tailscale или WireGuard либо за HTTPS-прокси. Без токена хаб согласен слушать только localhost.
-
-## Устройство
-
-```
-src/
-  main.rs        CLI
-  config.rs      ~/.kron/config.toml
-  llm/           openai, anthropic (+ claude OAuth), codex, gemini (+ antigravity)
-  auth.rs        OAuth: чтение логинов официальных CLI, обновление, kron login
-  tools/         инструменты в стиле Codex
-  agent.rs       цикл агента, web_search, spawn_agent
-  turn.rs        один ход в режиме agent / chat / web
-  browser.rs     веб-чаты через Chrome DevTools Protocol
-  store.rs       треды (JSONL), слияние
-  hub.rs         хаб: API, веб-интерфейс, очередь задач узлам
-  node.rs        клиент хаба и воркер узла
-```
+Один агент может отдавать подзадачи другим через `spawn_agent`.
 
 ## Важно
 
-Адаптеры подписок **неофициальные**: они повторяют запросы официальных CLI и могут сломаться при изменениях на стороне сервисов. Их использование может противоречить условиям этих сервисов, поэтому применяйте на свой риск.
+Адаптеры подписок **неофициальные**. Сервисы могут сломать их в любой момент, а использование может противоречить их условиям. Применяйте на свой риск.
 
 Пока не сделано:
 
-- песочница и подтверждение команд (агент работает с правами пользователя);
-- MCP-серверы;
-- `view_image`;
-- PTY для `exec_command` (используются обычные пайпы).
+- песочница и подтверждение команд;
+- MCP;
+- картинки во входящих сообщениях;
+- PTY.
+
+Чужой код и откуда он взят перечислены в [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

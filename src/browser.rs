@@ -3,15 +3,15 @@
 //! the subscription, not the API/agent ones.
 
 use crate::config::{BrowserCfg, Config, SiteCfg};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use futures::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::process::Child;
-use tokio_tungstenite::{tungstenite::Message as WsMsg, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message as WsMsg};
 
 pub struct Browser {
     child: Child,
@@ -102,12 +102,11 @@ impl Browser {
     /// Close gracefully so the profile (cookies) is flushed to disk.
     pub async fn close(mut self) {
         let url = format!("http://127.0.0.1:{}/json/version", self.port);
-        if let Ok(v) = async { local_http().get(&url).send().await?.json::<Value>().await }.await {
-            if let Some(ws) = v["webSocketDebuggerUrl"].as_str() {
-                if let Ok((mut ws, _)) = tokio_tungstenite::connect_async(ws).await {
-                    ws.send(WsMsg::Text(json!({"id": 1, "method": "Browser.close"}).to_string())).await.ok();
-                }
-            }
+        if let Ok(v) = async { local_http().get(&url).send().await?.json::<Value>().await }.await
+            && let Some(ws) = v["webSocketDebuggerUrl"].as_str()
+            && let Ok((mut ws, _)) = tokio_tungstenite::connect_async(ws).await
+        {
+            ws.send(WsMsg::Text(json!({"id": 1, "method": "Browser.close"}).to_string())).await.ok();
         }
         tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await.ok();
     }
@@ -269,10 +268,10 @@ pub async fn web_chat(cfg: &Config, site_name: &str, prompt: &str, url: Option<&
 
 /// Close the shared browser (a one-shot CLI run must not leave it behind).
 pub async fn shutdown() {
-    if let Some(lock) = BROWSER.get() {
-        if let Some(b) = lock.lock().await.take() {
-            b.close().await;
-        }
+    if let Some(lock) = BROWSER.get()
+        && let Some(b) = lock.lock().await.take()
+    {
+        b.close().await;
     }
 }
 

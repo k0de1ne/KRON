@@ -25,7 +25,7 @@ pub struct Config {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct ProviderCfg {
-    /// openai | anthropic | codex | claude | gemini | antigravity
+    /// openai | responses | anthropic | codex | claude | gemini | antigravity
     pub kind: String,
     pub model: String,
     pub base_url: Option<String>,
@@ -209,23 +209,38 @@ default = "codex"        # provider used when -p is not given
 
 [providers.codex]
 kind = "codex"           # ChatGPT Plus/Pro via the Codex backend
-model = "gpt-5-codex"
+model = "gpt-6-astra"
 
 [providers.claude]
 kind = "claude"          # Claude Pro/Max via Claude Code OAuth
-model = "claude-sonnet-4-5"
+model = "claude-opus-5-5"
 
 [providers.gemini]
 kind = "gemini"          # Gemini CLI login (Code Assist)
-model = "gemini-2.5-pro"
+model = "gemini-3.8-flash"
 # client_id / client_secret: the public Gemini CLI OAuth client, needed to
 # refresh tokens and for `kron login gemini` (see README).
 
 # [providers.antigravity]
 # kind = "antigravity"   # Google Antigravity quota (Gemini 3, Claude)
-# model = "gemini-3-pro-high"
+# model = "gemini-3.8-flash"
 # client_id = "..."
 # client_secret = "..."
+
+# ── Through CLIProxyAPI (github.com/router-for-me/CLIProxyAPI) ──────────────
+# A maintained proxy for the same subscriptions. Run it next to the hub and
+# point providers at it; native tools (web search) pass through.
+# [providers.claude-cpa]
+# kind = "anthropic"
+# base_url = "http://127.0.0.1:8317"
+# api_key = "<one of CLIProxyAPI's access.api-keys>"
+# model = "claude-opus-5-5"
+#
+# [providers.codex-cpa]
+# kind = "responses"
+# base_url = "http://127.0.0.1:8317/v1"
+# api_key = "<one of CLIProxyAPI's access.api-keys>"
+# model = "gpt-6-astra"
 
 # ── API keys ──────────────────────────────────────────────────────────────────
 

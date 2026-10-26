@@ -2,7 +2,7 @@
 //! fed through `write_stdin` (Codex's unified exec, over pipes so it works the
 //! same on Windows, Linux and Android).
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;

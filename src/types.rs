@@ -104,7 +104,6 @@ pub fn now_ms() -> i64 {
 }
 
 pub fn new_id() -> String {
-    use rand::Rng;
-    let n: u64 = rand::thread_rng().gen();
+    let n: u64 = rand::random();
     format!("{:x}{:016x}", now_ms(), n)
 }

@@ -2,25 +2,26 @@
 //! backend the Gemini CLI (kind = "gemini") and Antigravity (kind =
 //! "antigravity") use. Unofficial.
 
-use super::{check, http, sse, with_headers, Provider, Request, Response};
+use super::{Provider, Request, Response, check, http, sse, with_headers};
 use crate::auth::Auth;
 use crate::config::ProviderCfg;
-use crate::types::{new_id, Event, Message, Sink, ToolCall};
-use anyhow::{bail, Context, Result};
-use serde_json::{json, Map, Value};
+use crate::types::{Event, Message, Sink, ToolCall, new_id};
+use anyhow::{Context, Result, bail};
+use serde_json::{Map, Value, json};
 
 pub struct Gemini {
     cfg: ProviderCfg,
     auth: Auth,
     base: String,
     antigravity: bool,
+    session: String,
 }
 
 impl Gemini {
     pub fn new(cfg: &ProviderCfg, auth: Auth) -> Self {
         let antigravity = cfg.kind == "antigravity";
         let default = if antigravity {
-            "https://daily-cloudcode-pa.sandbox.googleapis.com"
+            "https://daily-cloudcode-pa.googleapis.com"
         } else {
             "https://cloudcode-pa.googleapis.com"
         };
@@ -29,6 +30,7 @@ impl Gemini {
             auth,
             base: cfg.base_url.clone().unwrap_or_else(|| default.into()).trim_end_matches('/').to_string(),
             antigravity,
+            session: new_id(),
         }
     }
 
@@ -37,9 +39,18 @@ impl Gemini {
             let creds = if attempt == 0 { self.auth.token().await? } else { self.auth.refresh().await? };
             let mut rb =
                 http().post(format!("{}/v1internal:{method}", self.base)).bearer_auth(creds.access_token).json(body);
-            if self.antigravity {
-                rb = rb.header("user-agent", "antigravity/1.11.5 windows/amd64");
-            }
+            // Client identities as sent by Antigravity (via CLIProxyAPI) and Gemini CLI.
+            let ua = if self.antigravity {
+                "antigravity/hub/2.24.0 (aidev_client; os_type=darwin; arch=arm64)".to_string()
+            } else {
+                format!(
+                    "GeminiCLI/0.40.0/{} ({}; {}; terminal)",
+                    self.cfg.model,
+                    std::env::consts::OS,
+                    std::env::consts::ARCH
+                )
+            };
+            rb = rb.header("user-agent", ua);
             let resp = with_headers(rb, &self.cfg).send().await?;
             if resp.status() == 401 && attempt == 0 {
                 continue;
@@ -88,6 +99,10 @@ impl Gemini {
             body["userAgent"] = json!("antigravity");
             body["requestType"] = json!("agent");
             body["requestId"] = json!(format!("agent-{}", new_id()));
+            body["request"]["sessionId"] = json!(self.session);
+        } else {
+            body["user_prompt_id"] = json!(new_id());
+            body["request"]["session_id"] = json!(self.session);
         }
         Ok(body)
     }

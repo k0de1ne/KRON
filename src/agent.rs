@@ -4,7 +4,7 @@ use crate::config::Config;
 use crate::llm::{self, Provider, Request};
 use crate::store::repair;
 use crate::tools::{self, AGENT_SIDE};
-use crate::types::{preview, Event, Message, NullSink, Sink, Tool, ToolCall};
+use crate::types::{Event, Message, NullSink, Sink, Tool, ToolCall, preview};
 use anyhow::Result;
 use futures::future::join_all;
 use serde_json::Value;
@@ -69,13 +69,8 @@ pub fn environment(node: &str, cwd: &std::path::Path) -> String {
     s
 }
 
-const BASE_PROMPT: &str = "You are kron, an autonomous agent working on the user's machine through tools.
-- Explore before changing things; read files before editing them.
-- Edit files with apply_patch. Use shell for builds, tests, git and anything else.
-- Use update_plan for multi-step work and keep it current.
-- Verify your changes (build, run tests) when possible.
-- Never run destructive commands (rm -rf, git reset --hard, force pushes) unless asked.
-- Finish with a short summary of what you did and anything left to do.";
+/// The Codex CLI system prompt (openai/codex, Apache-2.0), lightly adapted.
+const BASE_PROMPT: &str = include_str!("prompts/codex.md");
 
 pub struct Agent {
     cfg: Arc<Config>,

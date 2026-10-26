@@ -5,19 +5,21 @@
 //! official CLI share one login. `kron login <provider>` creates a separate
 //! login stored in ~/.kron/auth/<provider>.json.
 
-use crate::config::{user_home, Config, ProviderCfg};
+use crate::config::{Config, ProviderCfg, user_home};
 use crate::llm::{check, http};
 use crate::types::now_ms;
-use anyhow::{bail, Context, Result};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+use anyhow::{Context, Result, bail};
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const CLAUDE_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+const CLAUDE_SCOPE: &str = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Creds {
@@ -231,12 +233,9 @@ impl Auth {
                     .await?
             }
             "claude" => {
-                let body =
-                    json!({"grant_type": "refresh_token", "refresh_token": old.refresh_token, "client_id": client_id});
-                check(http().post("https://console.anthropic.com/v1/oauth/token").json(&body).send().await?)
-                    .await?
-                    .json()
-                    .await?
+                let body = json!({"client_id": client_id, "grant_type": "refresh_token",
+                    "refresh_token": old.refresh_token, "scope": CLAUDE_SCOPE});
+                check(http().post(CLAUDE_TOKEN_URL).json(&body).send().await?).await?.json().await?
             }
             _ => {
                 let secret = self.client_secret.clone().with_context(|| {
@@ -357,7 +356,7 @@ pub async fn login(cfg: &Config, name: &str) -> Result<()> {
             creds_from_token_response(&v, None)
         }
         "claude" => {
-            let redirect = "https://console.anthropic.com/oauth/code/callback";
+            let redirect = "http://localhost:54545/callback";
             let url = reqwest::Url::parse_with_params(
                 "https://claude.ai/oauth/authorize",
                 &[
@@ -365,22 +364,20 @@ pub async fn login(cfg: &Config, name: &str) -> Result<()> {
                     ("client_id", CLAUDE_CLIENT_ID),
                     ("response_type", "code"),
                     ("redirect_uri", redirect),
-                    ("scope", "org:create_api_key user:profile user:inference"),
+                    ("scope", CLAUDE_SCOPE),
                     ("code_challenge", &challenge),
                     ("code_challenge_method", "S256"),
-                    ("state", &verifier),
+                    ("state", &state),
                 ],
             )?;
-            let pasted = wait_for_code(url.as_str(), None).await?;
-            let (code, st) = pasted.split_once('#').unwrap_or((pasted.as_str(), verifier.as_str()));
+            let pasted = wait_for_code(url.as_str(), Some(54545)).await?;
+            // The code may carry the state after '#'.
+            let (code, st) = pasted.split_once('#').unwrap_or((pasted.as_str(), state.as_str()));
             let body = json!({
-                "code": code, "state": st, "grant_type": "authorization_code",
-                "client_id": CLAUDE_CLIENT_ID, "redirect_uri": redirect, "code_verifier": verifier,
+                "grant_type": "authorization_code", "code": code, "redirect_uri": redirect,
+                "client_id": CLAUDE_CLIENT_ID, "code_verifier": verifier, "state": st,
             });
-            let v: Value = check(http().post("https://console.anthropic.com/v1/oauth/token").json(&body).send().await?)
-                .await?
-                .json()
-                .await?;
+            let v: Value = check(http().post(CLAUDE_TOKEN_URL).json(&body).send().await?).await?.json().await?;
             creds_from_token_response(&v, None)
         }
         "gemini" | "antigravity" => {
@@ -388,16 +385,17 @@ pub async fn login(cfg: &Config, name: &str) -> Result<()> {
                 (Some(i), Some(s)) => (i.clone(), s.clone()),
                 _ => bail!("set client_id and client_secret for provider '{name}' first (see README)"),
             };
-            let (port, path, extra) = if p.kind == "gemini" {
-                (8085, "/oauth2callback", "")
+            // Gemini CLI's no-browser flow shows the code on a Google page; Antigravity
+            // only allows its loopback redirect.
+            let (redirect, port, extra) = if p.kind == "gemini" {
+                ("https://codeassist.google.com/authcode".to_string(), None, "")
             } else {
                 (
-                    51121,
-                    "/oauth-callback",
+                    "http://localhost:51121/oauth-callback".to_string(),
+                    Some(51121),
                     " https://www.googleapis.com/auth/cclog https://www.googleapis.com/auth/experimentsandconfigs",
                 )
             };
-            let redirect = format!("http://localhost:{port}{path}");
             let scope = format!(
                 "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile{extra}"
             );
@@ -415,7 +413,7 @@ pub async fn login(cfg: &Config, name: &str) -> Result<()> {
                     ("state", &state),
                 ],
             )?;
-            let code = wait_for_code(url.as_str(), Some(port)).await?;
+            let code = wait_for_code(url.as_str(), port).await?;
             let form = [
                 ("client_id", client_id.as_str()),
                 ("client_secret", secret.as_str()),

@@ -1,10 +1,10 @@
 //! OpenAI-compatible chat completions: OpenAI, DeepSeek, OpenRouter, llama.cpp, Ollama...
 
-use super::{api_key, check, http, sse, with_headers, Provider, Request, Response};
+use super::{Provider, Request, Response, api_key, check, http, sse, with_headers};
 use crate::config::ProviderCfg;
 use crate::types::{Event, Message, Sink, ToolCall};
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub struct OpenAi {
     cfg: ProviderCfg,

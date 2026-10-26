@@ -2,7 +2,7 @@
 //! ~/.kron/tools add more (stdin: JSON arguments, stdout: result).
 
 use crate::types::Tool;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 pub mod apply_patch;
@@ -22,64 +22,153 @@ fn tool(name: &str, description: &str, parameters: Value) -> Tool {
     Tool { name: name.into(), description: description.into(), parameters }
 }
 
+/// Tool definitions. Names, parameters and descriptions follow the Codex CLI
+/// (openai/codex, Apache-2.0) so models trained on Codex use them well.
 pub fn builtin() -> Vec<Tool> {
+    let shell_note = if cfg!(windows) { " Commands run in PowerShell." } else { "" };
     vec![
-        tool("shell", "Run a shell command (PowerShell on Windows, sh elsewhere) and return its output. \
-            Set workdir instead of using cd.",
+        tool(
+            "shell",
+            &format!(
+                "Runs a shell command and returns its output. Always set the `workdir` param instead of using `cd`.{shell_note}"
+            ),
             json!({"type": "object", "required": ["command"], "properties": {
-                "command": {"type": "string", "description": "The command line to run"},
-                "workdir": {"type": "string", "description": "Working directory (default: session cwd)"},
-                "timeout_ms": {"type": "number", "description": "Kill after this many ms (default 120000)"}}})),
-        tool("exec_command", "Start a long-running or interactive command. Returns output collected for \
-            yield_time_ms and, if still running, a session_id for write_stdin.",
+                "command": {"type": "string", "description": "The shell script to execute in the user's default shell."},
+                "workdir": {"type": "string", "description": "The working directory to execute the command in."},
+                "timeout_ms": {"type": "number", "description": "The timeout for the command in milliseconds (default 120000)."}}}),
+        ),
+        tool(
+            "exec_command",
+            &format!("Runs a command, returning output or a session ID for ongoing interaction.{shell_note}"),
             json!({"type": "object", "required": ["cmd"], "properties": {
-                "cmd": {"type": "string"},
-                "workdir": {"type": "string"},
-                "yield_time_ms": {"type": "number", "description": "How long to wait for output (default 10000)"}}})),
-        tool("write_stdin", "Write characters to a running exec_command session (empty string just polls) \
-            and return new output.",
+                "cmd": {"type": "string", "description": "Shell command to execute."},
+                "workdir": {"type": "string", "description": "Working directory for the command. Defaults to the turn cwd."},
+                "yield_time_ms": {"type": "number", "description": "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms."}}}),
+        ),
+        tool(
+            "write_stdin",
+            "Writes characters to an existing unified exec session and returns recent output.",
             json!({"type": "object", "required": ["session_id"], "properties": {
-                "session_id": {"type": "number"},
-                "chars": {"type": "string", "description": "Text to send; include \\n to submit a line"},
-                "yield_time_ms": {"type": "number"}}})),
-        tool("apply_patch", "Edit files with a patch. Format:\n*** Begin Patch\n*** Add File: path\n+line\n\
-            *** Delete File: path\n*** Update File: path\n*** Move to: new_path (optional)\n@@ context line (optional)\n \
-            unchanged\n-removed\n+added\n*** End Patch\nShow 3 lines of context around each change; \
-            paths are relative to the working directory.",
+                "session_id": {"type": "number", "description": "Identifier of the running unified exec session."},
+                "chars": {"type": "string", "description": "Bytes to write to stdin. Defaults to empty, which polls without writing."},
+                "yield_time_ms": {"type": "number", "description": "Wait before yielding output. Defaults to 2000 ms."}}}),
+        ),
+        tool(
+            "apply_patch",
+            APPLY_PATCH_DESCRIPTION,
             json!({"type": "object", "required": ["input"], "properties": {
-                "input": {"type": "string", "description": "The whole patch"}}})),
-        tool("read_file", "Read a text file with line numbers.",
+            "input": {"type": "string", "description": "The entire contents of the apply_patch command"}}}),
+        ),
+        tool(
+            "read_file",
+            "Reads a local file with 1-indexed line numbers.",
             json!({"type": "object", "required": ["file_path"], "properties": {
-                "file_path": {"type": "string"},
-                "offset": {"type": "number", "description": "1-based line to start at"},
-                "limit": {"type": "number", "description": "Max lines (default 2000)"}}})),
-        tool("list_dir", "List a directory tree.",
+                "file_path": {"type": "string", "description": "Path to the file"},
+                "offset": {"type": "number", "description": "The line number to start reading from. Must be 1 or greater."},
+                "limit": {"type": "number", "description": "The maximum number of lines to return (default 2000)."}}}),
+        ),
+        tool(
+            "list_dir",
+            "Lists entries in a local directory with 1-indexed entry numbers and simple type labels.",
             json!({"type": "object", "required": ["dir_path"], "properties": {
-                "dir_path": {"type": "string"},
-                "depth": {"type": "number", "description": "Levels to descend (default 2)"},
-                "offset": {"type": "number"},
-                "limit": {"type": "number"}}})),
-        tool("grep_files", "Search file contents with a regex (respects .gitignore). Returns path:line: text.",
+                "dir_path": {"type": "string", "description": "Path to the directory to list."},
+                "offset": {"type": "number", "description": "The entry number to start listing from. Must be 1 or greater."},
+                "limit": {"type": "number", "description": "The maximum number of entries to return."},
+                "depth": {"type": "number", "description": "The maximum directory depth to traverse. Must be 1 or greater."}}}),
+        ),
+        tool(
+            "grep_files",
+            "Finds lines matching a regular expression (respects .gitignore). Returns path:line: text.",
             json!({"type": "object", "required": ["pattern"], "properties": {
-                "pattern": {"type": "string"},
-                "include": {"type": "string", "description": "Glob filter, e.g. \"*.rs\" or \"*.{ts,tsx}\""},
-                "path": {"type": "string", "description": "Directory to search (default: cwd)"},
-                "limit": {"type": "number"}}})),
-        tool("update_plan", "Record or update your step-by-step plan. Keep exactly one step in_progress.",
+                "pattern": {"type": "string", "description": "Regular expression pattern to search for."},
+                "include": {"type": "string", "description": "Optional glob that limits which files are searched (e.g. \"*.rs\" or \"*.{ts,tsx}\")."},
+                "path": {"type": "string", "description": "Directory or file path to search. Defaults to the session's working directory."},
+                "limit": {"type": "number", "description": "Maximum number of matches to return (defaults to 200)."}}}),
+        ),
+        tool(
+            "update_plan",
+            "Updates the task plan.\nProvide an optional explanation and a list of plan items, each with a step and status.\nAt most one step can be in_progress at a time.\n",
             json!({"type": "object", "required": ["plan"], "properties": {
-                "explanation": {"type": "string"},
-                "plan": {"type": "array", "items": {"type": "object", "required": ["step", "status"], "properties": {
-                    "step": {"type": "string"},
-                    "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}}}}}})),
-        tool("web_search", "Search the web with a provider's native search and get a sourced answer.",
-            json!({"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}}})),
-        tool("spawn_agent", "Hand a self-contained task to another agent (see the agent list in your \
-            instructions) and get its final answer. Several calls run in parallel.",
+                "explanation": {"type": "string", "description": "Optional explanation for this plan update."},
+                "plan": {"type": "array", "description": "The list of steps", "items": {"type": "object", "required": ["step", "status"], "properties": {
+                    "step": {"type": "string", "description": "Task step text."},
+                    "status": {"type": "string", "enum": ["pending", "in_progress", "completed"], "description": "Step status."}}}}}}),
+        ),
+        tool(
+            "web_search",
+            "Searches the web with the model provider's native search and returns a sourced answer.",
+            json!({"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}}}),
+        ),
+        tool(
+            "spawn_agent",
+            "Hands a self-contained task to another agent (see the agent list in your instructions) and returns its \
+            final answer. Several calls run in parallel.",
             json!({"type": "object", "required": ["task"], "properties": {
                 "agent": {"type": "string", "description": "Agent name (default: same as you)"},
-                "task": {"type": "string"}}})),
+                "task": {"type": "string"}}}),
+        ),
     ]
 }
+
+/// Instructions for the JSON (non-freeform) apply_patch tool, modelled on Codex's.
+const APPLY_PATCH_DESCRIPTION: &str = r#"Use the `apply_patch` tool to edit files.
+Your patch language is a stripped-down, file-oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high-level envelope:
+
+*** Begin Patch
+[ one or more file sections ]
+*** End Patch
+
+Within that envelope, you get a sequence of file operations.
+You MUST include a header to specify the action you are taking.
+Each operation starts with one of three headers:
+
+*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).
+*** Delete File: <path> - remove an existing file. Nothing follows.
+*** Update File: <path> - patch an existing file in place (optionally with a rename).
+
+May be immediately followed by *** Move to: <new path> if you want to rename the file.
+Then one or more "hunks", each introduced by @@ (optionally followed by a hunk header).
+Within a hunk each line starts with:
+
+For instructions on [context_before] and [context_after]:
+- By default, show 3 lines of code immediately above and 3 lines immediately below each change. If a change is within 3 lines of a previous change, do NOT duplicate the first change's [context_after] lines in the second change's [context_before] lines.
+- If 3 lines of context is insufficient to uniquely identify the snippet of code within the file, use the @@ operator to indicate the class or function to which the snippet belongs.
+- If a code block is repeated so many times in a class or function such that even a single `@@` statement and 3 lines of context cannot uniquely identify the snippet of code, you can use multiple `@@` statements to jump to the right context.
+
+The full grammar definition is below:
+Patch := Begin { FileOp } End
+Begin := "*** Begin Patch" NEWLINE
+End := "*** End Patch" NEWLINE
+FileOp := AddFile | DeleteFile | UpdateFile
+AddFile := "*** Add File: " path NEWLINE { "+" line NEWLINE }
+DeleteFile := "*** Delete File: " path NEWLINE
+UpdateFile := "*** Update File: " path NEWLINE [ MoveTo ] { Hunk }
+MoveTo := "*** Move to: " newPath NEWLINE
+Hunk := "@@" [ header ] NEWLINE { HunkLine } [ "*** End of File" NEWLINE ]
+HunkLine := (" " | "-" | "+") text NEWLINE
+
+A full patch can combine several operations:
+
+*** Begin Patch
+*** Add File: hello.txt
++Hello world
+*** Update File: src/app.py
+*** Move to: src/main.py
+@@ def greet():
+-print("Hi")
++print("Hello, world!")
+*** Delete File: obsolete.txt
+*** End Patch
+
+It is important to remember:
+
+- You must include a header with your intended action (Add/Delete/Update)
+- You must prefix new lines with `+` even when creating a new file
+- File references can only be relative, NEVER ABSOLUTE.
+"#;
+
+/// Lark grammar of the freeform apply_patch tool (for OpenAI Responses models).
+pub const APPLY_PATCH_LARK: &str = include_str!("../prompts/apply_patch.lark");
 
 /// Scripts in the extension dirs. `name.toml` next to a script describes it.
 pub fn external(dirs: &[PathBuf]) -> Vec<Tool> {

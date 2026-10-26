@@ -2,12 +2,12 @@
 //! /anthropic endpoint, any compatible gateway) or with a Claude Pro/Max
 //! subscription through Claude Code's OAuth login (kind = "claude").
 
-use super::{api_key, check, http, openai::parse_args, sse, with_headers, Provider, Request, Response};
+use super::{Provider, Request, Response, api_key, check, http, openai::parse_args, sse, with_headers};
 use crate::auth::Auth;
 use crate::config::ProviderCfg;
 use crate::types::{Event, Message, Sink, ToolCall};
-use anyhow::{bail, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, bail};
+use serde_json::{Value, json};
 
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
@@ -38,11 +38,16 @@ impl Anthropic {
                 http().post(format!("{}/v1/messages", self.base)).header("anthropic-version", "2023-06-01").json(body);
             if let Some(auth) = &self.oauth {
                 let creds = if attempt == 0 { auth.token().await? } else { auth.refresh().await? };
+                // Identity headers as Claude Code sends them (values from CLIProxyAPI).
                 rb = rb
                     .bearer_auth(creds.access_token)
-                    .header("anthropic-beta", "claude-code-20250219,oauth-2025-04-20")
-                    .header("user-agent", "claude-cli/2.0.0 (external, cli)")
-                    .header("x-app", "cli");
+                    .header("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14")
+                    .header("user-agent", "claude-cli/2.1.280 (external, cli)")
+                    .header("x-app", "cli")
+                    .header("x-stainless-lang", "js")
+                    .header("x-stainless-runtime", "node")
+                    .header("x-stainless-retry-count", "0")
+                    .header("x-stainless-timeout", "600");
             } else if let Some(k) = &self.key {
                 rb = rb.header("x-api-key", k);
             }

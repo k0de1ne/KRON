@@ -1,8 +1,8 @@
 //! Threads: append-only JSONL files of records with unique ids, so copies
 //! from different devices merge by union.
 
-use crate::types::{new_id, now_ms, Message};
-use anyhow::{bail, Result};
+use crate::types::{Message, new_id, now_ms};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Write;
@@ -112,6 +112,13 @@ impl Store {
         }
         out.sort_by_key(|t| std::cmp::Reverse(t.updated));
         out
+    }
+
+    pub fn delete(&self, name: &str) -> Result<()> {
+        valid_name(name)?;
+        std::fs::remove_file(self.file(name))?;
+        std::fs::remove_file(self.dir.join(format!("{name}.meta.json"))).ok();
+        Ok(())
     }
 
     /// Small per-thread key/value data (e.g. web chat URLs).
