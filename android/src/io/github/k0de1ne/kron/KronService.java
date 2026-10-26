@@ -34,7 +34,7 @@ public class KronService extends Service {
         Notification n = new Notification.Builder(this, "kron")
                 .setSmallIcon(R.drawable.ic_stat)
                 .setContentTitle("kron работает")
-                .setContentText("Агенты и чаты доступны на 127.0.0.1:7700")
+                .setContentText("Агенты и чаты работают на телефоне")
                 .setContentIntent(open)
                 .addAction(new Notification.Action.Builder(null, "Остановить", stop).build())
                 .setOngoing(true)
@@ -76,6 +76,8 @@ public class KronService extends Service {
                 env.put("HOME", home.getAbsolutePath());
                 env.put("TMPDIR", getCacheDir().getAbsolutePath());
                 env.put("SHELL", "/system/bin/sh");
+                // Own port, so a kron started by hand (e.g. in Termux) cannot shadow the app.
+                env.put("KRON_LISTEN", "127.0.0.1:" + MainActivity.PORT);
                 env.put("HOSTNAME", Build.MODEL.toLowerCase().replaceAll("[^a-z0-9]+", "-"));
                 proc = pb.start();
                 proc.waitFor();

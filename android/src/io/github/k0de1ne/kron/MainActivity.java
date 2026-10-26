@@ -22,7 +22,8 @@ import java.io.RandomAccessFile;
 
 /** The kron chat UI in a WebView, served by KronService on this phone. */
 public class MainActivity extends Activity {
-    static final String UI = "http://127.0.0.1:7700/";
+    static final int PORT = 7790;
+    static final String UI = "http://127.0.0.1:" + PORT + "/";
     private WebView web;
     private int retries;
 
@@ -43,7 +44,7 @@ public class MainActivity extends Activity {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
                 Uri u = req.getUrl();
-                if ("127.0.0.1".equals(u.getHost()) && u.getPort() == 7700) return false;
+                if ("127.0.0.1".equals(u.getHost()) && u.getPort() == PORT) return false;
                 // Sign-in pages and links open in the real browser; its redirect to
                 // localhost still reaches kron on this phone.
                 startActivity(new Intent(Intent.ACTION_VIEW, u));

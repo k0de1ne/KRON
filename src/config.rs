@@ -179,12 +179,18 @@ pub fn user_home() -> PathBuf {
 }
 
 pub fn hostname() -> String {
+    let clean =
+        |s: String| Some(s.trim().to_lowercase().replace(' ', "-")).filter(|s| !s.is_empty() && s != "localhost");
+    let android_model = || {
+        let out = std::process::Command::new("getprop").arg("ro.product.model").output().ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).to_string())
+    };
     std::env::var("COMPUTERNAME")
         .ok()
-        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
-        .or_else(|| std::env::var("HOSTNAME").ok())
-        .map(|s| s.trim().to_lowercase())
-        .filter(|s| !s.is_empty())
+        .and_then(clean)
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok().and_then(clean))
+        .or_else(|| std::env::var("HOSTNAME").ok().and_then(clean))
+        .or_else(|| if cfg!(target_os = "android") { android_model().and_then(clean) } else { None })
         .unwrap_or_else(|| std::env::consts::OS.to_string())
 }
 

@@ -7,7 +7,7 @@ use crate::config::Config;
 use crate::store::{Record, Store};
 use crate::turn::{TurnReq, turn};
 use crate::types::{Event, Sink, Tool, new_id};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -86,7 +86,8 @@ impl Hub {
 type Shared = Arc<Hub>;
 
 pub async fn serve(cfg: Arc<Config>, workdir: std::path::PathBuf) -> Result<()> {
-    let listen = cfg.hub.listen.clone().unwrap_or_else(|| "127.0.0.1:7700".into());
+    let listen =
+        cfg.hub.listen.clone().or_else(|| std::env::var("KRON_LISTEN").ok()).unwrap_or_else(|| "127.0.0.1:7700".into());
     let loopback = listen.starts_with("127.") || listen.starts_with("localhost") || listen.starts_with("[::1]");
     if cfg.hub.token.as_deref().unwrap_or("").is_empty() && !loopback {
         bail!("set [hub] token before listening on {listen}: nodes execute commands for whoever holds it");
@@ -132,7 +133,9 @@ pub async fn serve(cfg: Arc<Config>, workdir: std::path::PathBuf) -> Result<()> 
         .route("/api/nodes/:name/poll", get(node_poll))
         .route("/api/nodes/:name/result", post(node_result))
         .with_state(hub.clone());
-    let listener = tokio::net::TcpListener::bind(&listen).await?;
+    let listener = tokio::net::TcpListener::bind(&listen)
+        .await
+        .with_context(|| format!("cannot listen on {listen} (is another kron running?)"))?;
     eprintln!("kron hub on http://{listen} (this machine is node '{}')", hub.name);
     axum::serve(listener, app).await?;
     Ok(())
