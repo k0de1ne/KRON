@@ -131,6 +131,26 @@ main { flex: 1; min-width: 0; display: flex; flex-direction: column; position: r
 #login input { padding: 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--input); }
 #login button { padding: 12px; border-radius: 10px; background: var(--accent); color: var(--accent-fg); font-weight: 600; }
 
+#settings { position: fixed; inset: 0; z-index: 45; background: var(--bg); overflow-y: auto; }
+#settings .wrap { max-width: 780px; margin: 0 auto; padding: 0 16px calc(24px + env(safe-area-inset-bottom)); }
+#settings header { display: flex; align-items: center; gap: 8px; height: 52px; }
+#settings header h2 { flex: 1; margin: 0; font-size: 18px; }
+#settings h3 { font-size: 14px; color: var(--muted); font-weight: 500; margin: 18px 0 8px; }
+.prov { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; margin-bottom: 8px; background: var(--input); }
+.prov .n { flex: 1; min-width: 0; }
+.prov .n small { display: block; color: var(--muted); font-size: 12px; }
+.prov .ok { color: #16a34a; font-size: 13px; }
+.btn { padding: 7px 14px; border-radius: 10px; border: 1px solid var(--line); font-size: 14px; white-space: nowrap; }
+.btn.main { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 600; }
+.paste { display: flex; gap: 6px; margin: -2px 0 10px; }
+.paste input { flex: 1; min-width: 0; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--input); }
+#cfgText { width: 100%; min-height: 50vh; padding: 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--code); font: 13px/1.5 ui-monospace, Menlo, Consolas, monospace; resize: vertical; }
+#cfgBar { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+#cfgMsg { flex: 1; font-size: 13px; color: var(--muted); white-space: pre-wrap; }
+#cfgMsg.err { color: var(--danger); }
+#openSettings { display: block; width: 100%; text-align: left; padding: 8px 10px; margin: -4px 0 6px -10px; border-radius: 10px; font-size: 14px; color: var(--fg); }
+#openSettings:hover { background: var(--hover); }
+
 @media (max-width: 760px) {
   #side { position: fixed; z-index: 40; inset: 0 auto 0 0; width: 84vw; max-width: 320px; transform: translateX(-102%); transition: transform .2s ease; }
   body.drawer #side { transform: none; }
@@ -151,7 +171,7 @@ main { flex: 1; min-width: 0; display: flex; flex-direction: column; position: r
     </div>
     <div class="label">Чаты</div>
     <nav id="threads"></nav>
-    <div class="side-foot" id="nodes"></div>
+    <div class="side-foot"><button id="openSettings">⚙ Настройки и вход</button><div id="nodes"></div></div>
   </aside>
   <div id="scrim"></div>
   <main>
@@ -178,6 +198,16 @@ main { flex: 1; min-width: 0; display: flex; flex-direction: column; position: r
       <div class="hint">Подписки и API из одного места · ответы ИИ могут быть неточными</div>
     </footer>
   </main>
+</div>
+<div id="settings" hidden>
+  <div class="wrap">
+    <header><h2>Настройки</h2><button class="btn" id="closeSettings">Готово</button></header>
+    <h3>Подписки</h3>
+    <div id="provList"></div>
+    <h3>config.toml — провайдеры, ключи API, агенты, хаб</h3>
+    <textarea id="cfgText" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+    <div id="cfgBar"><div id="cfgMsg"></div><button class="btn main" id="cfgSave">Сохранить</button></div>
+  </div>
 </div>
 <div id="login" hidden>
   <form id="loginForm">
@@ -437,7 +467,7 @@ function buildModelMenu() {
     }
   };
   const kinds = {codex: 'подписка ChatGPT', claude: 'подписка Claude', gemini: 'подписка Gemini', antigravity: 'Antigravity', openai: 'API', anthropic: 'API', responses: 'API'};
-  add('Модели', S.info.providers.map(p => [{kind: 'provider', name: p.name}, `${p.name} · ${p.model}`, kinds[p.kind] || p.kind]));
+  add('Модели', S.info.providers.map(p => [{kind: 'provider', name: p.name}, `${p.name} · ${p.model}`, (kinds[p.kind] || p.kind) + (p.oauth && !p.logged_in ? ' · нужен вход' : '')]));
   add('Агенты', S.info.agents.map(a => [{kind: 'agent', name: a}, a, 'пресет из config.toml']));
   add('Веб-чаты (лимиты чата, через браузер)', S.info.sites.map(s => [{kind: 'site', name: s}, SITE_NAME[s] || s, 'как в обычном чате на сайте']));
 }
@@ -559,6 +589,61 @@ async function follow(runId) {
 $('newChat').onclick = () => openThread(null);
 $('menu').onclick = () => document.body.classList.add('drawer');
 $('scrim').onclick = () => document.body.classList.remove('drawer');
+
+// ── Settings: subscriptions sign-in and config.toml ──────────────────────────
+async function openSettings() {
+  document.body.classList.remove('drawer');
+  $('settings').hidden = false; $('cfgMsg').textContent = ''; $('cfgMsg').className = '';
+  renderProviders();
+  const c = await (await api('/api/config')).json();
+  $('cfgText').value = c.text; $('cfgMsg').textContent = c.path;
+}
+function renderProviders() {
+  const box = $('provList'); box.innerHTML = '';
+  const subs = S.info.providers.filter(p => p.oauth);
+  if (!subs.length) box.append(el('div', 'note', 'Нет подписок в конфиге (kind = codex / claude / gemini / antigravity).'));
+  for (const p of subs) {
+    const row = el('div', 'prov'), n = el('div', 'n');
+    n.textContent = p.name; const sm = el('small'); sm.textContent = `${p.kind} · ${p.model}`; n.append(sm);
+    row.append(n);
+    if (p.logged_in) row.append(el('span', 'ok', '✓ вход выполнен'));
+    const b = el('button', 'btn' + (p.logged_in ? '' : ' main'), p.logged_in ? 'Войти заново' : 'Войти');
+    b.onclick = () => signIn(p, row);
+    row.append(b); box.append(row);
+  }
+}
+async function signIn(p, row) {
+  let r;
+  try { r = await (await api('/api/login/' + p.name, {method: 'POST'})).json(); }
+  catch (e) { alert(e.message); return; }
+  // In the Android app this navigation opens the system browser.
+  if (/kron-android/.test(navigator.userAgent)) location.href = r.url; else window.open(r.url, '_blank');
+  if (row.nextElementSibling && row.nextElementSibling.classList.contains('paste')) row.nextElementSibling.remove();
+  const box = el('div', 'paste'), inp = el('input'), ok = el('button', 'btn', 'Готово');
+  inp.placeholder = r.paste ? 'Вставьте код со страницы входа' : 'Если не сработало само — вставьте адрес из браузера';
+  box.append(inp, ok); row.after(box);
+  const done = async () => { clearInterval(timer); await loadInfo(); renderProviders(); };
+  ok.onclick = async () => {
+    try { await api('/api/login/' + p.name + '/code', {method: 'POST', body: JSON.stringify({code: inp.value})}); done(); }
+    catch (e) { alert(e.message); }
+  };
+  const timer = setInterval(async () => {
+    if ($('settings').hidden) { clearInterval(timer); return; }
+    const st = await (await api('/api/login/' + p.name)).json().catch(() => ({}));
+    if (st.state === 'done') done();
+    else if (st.state === 'error') { clearInterval(timer); alert(st.error); }
+  }, 2000);
+}
+$('openSettings').onclick = () => openSettings().catch(e => alert(e.message));
+$('closeSettings').onclick = () => { $('settings').hidden = true; };
+$('cfgSave').onclick = async () => {
+  const msg = $('cfgMsg');
+  try {
+    await api('/api/config', {method: 'PUT', body: JSON.stringify({text: $('cfgText').value})});
+    msg.className = ''; msg.textContent = 'Сохранено и применено';
+    await loadInfo(); renderProviders();
+  } catch (e) { msg.className = 'err'; msg.textContent = e.message; }
+};
 
 async function boot() {
   try {

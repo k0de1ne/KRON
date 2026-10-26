@@ -67,6 +67,9 @@ enum Cmd {
     Init,
     /// Run the hub: threads, agent loops, web UI, node coordination
     Serve,
+    /// What the Android app runs: creates a config if missing, serves the UI on
+    /// this device and, with [hub] url set, also works as a node for that hub
+    App,
     /// Connect this machine to the hub so agents can work on it
     Node {
         /// Working directory for tools (default: current directory)
@@ -115,6 +118,22 @@ async fn real_main() -> Result<()> {
     match cli.cmd {
         Some(Cmd::Init) => init(&cfg),
         Some(Cmd::Serve) => hub::serve(cfg.clone(), workdir(&cfg, None)?).await,
+        Some(Cmd::App) => {
+            if !cfg.file.exists() {
+                init(&cfg)?;
+            }
+            let cfg = Arc::new(Config::load(Some(&cfg.file))?);
+            let dir = workdir(&cfg, None)?;
+            if let Some(client) = hub {
+                let (cfg, name, dir) = (cfg.clone(), cfg.node_name(), dir.clone());
+                tokio::spawn(async move {
+                    if let Err(e) = node::work(cfg, client, name, dir, false, None).await {
+                        eprintln!("node: {e:#}");
+                    }
+                });
+            }
+            hub::serve(cfg, dir).await
+        }
         Some(Cmd::Node { dir }) => {
             let client = hub.context("set [hub] url (and token) in config first")?;
             let name = cfg.node_name();
@@ -197,12 +216,12 @@ fn workdir(cfg: &Config, explicit: Option<PathBuf>) -> Result<PathBuf> {
 }
 
 fn init(cfg: &Config) -> Result<()> {
-    let path = cfg.path("config.toml");
+    let path = &cfg.file;
     if path.exists() {
         bail!("{} already exists", path.display());
     }
-    std::fs::create_dir_all(&cfg.home)?;
-    std::fs::write(&path, config::EXAMPLE)?;
+    std::fs::create_dir_all(path.parent().unwrap_or(&cfg.home))?;
+    std::fs::write(path, config::EXAMPLE)?;
     println!("Wrote {}", path.display());
     Ok(())
 }

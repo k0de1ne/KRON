@@ -20,6 +20,9 @@ pub struct Config {
 
     #[serde(skip)]
     pub home: PathBuf,
+    /// The file this config was read from (and is saved to by the web UI).
+    #[serde(skip)]
+    pub file: PathBuf,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -97,15 +100,19 @@ pub struct SiteCfg {
 
 impl Config {
     pub fn load(explicit: Option<&Path>) -> Result<Config> {
-        let home = home_dir();
-        let path = explicit.map(Path::to_path_buf).unwrap_or_else(|| home.join("config.toml"));
-        let mut cfg: Config = if path.exists() {
-            let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?
+        let path = explicit.map(Path::to_path_buf).unwrap_or_else(|| home_dir().join("config.toml"));
+        let text = if path.exists() {
+            std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?
         } else {
-            Config::default()
+            String::new()
         };
-        cfg.home = home;
+        Config::parse(&text, path)
+    }
+
+    pub fn parse(text: &str, file: PathBuf) -> Result<Config> {
+        let mut cfg: Config = toml::from_str(text).with_context(|| format!("parsing {}", file.display()))?;
+        cfg.home = home_dir();
+        cfg.file = file;
         for (name, site) in builtin_sites() {
             cfg.sites.entry(name.to_string()).or_insert(site);
         }

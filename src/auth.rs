@@ -132,6 +132,10 @@ impl Auth {
         Ok(())
     }
 
+    pub fn logged_in(&self) -> bool {
+        self.load().is_ok()
+    }
+
     pub fn describe(&self) -> String {
         match self.load() {
             Ok(c) => {
@@ -317,13 +321,28 @@ pub fn write_private(path: &std::path::Path, text: &str) -> Result<()> {
 
 /// Interactive OAuth login. Works without a local browser: open the printed
 /// link anywhere, then paste back the URL you were redirected to.
-pub async fn login(cfg: &Config, name: &str) -> Result<()> {
+/// An OAuth sign-in in progress: open `url`, then hand the redirect (or the
+/// code) to `finish`. Used by `kron login` and by the web UI.
+pub struct Flow {
+    pub url: String,
+    /// Local port the redirect lands on when the browser runs on this machine.
+    pub port: Option<u16>,
+    name: String,
+    kind: String,
+    redirect: String,
+    verifier: String,
+    state: String,
+    client: Option<(String, String)>,
+}
+
+pub fn begin(cfg: &Config, name: &str) -> Result<Flow> {
     let p = cfg.provider(name)?;
     let verifier = B64URL.encode(rand::random::<[u8; 32]>());
     let challenge = B64URL.encode(Sha256::digest(verifier.as_bytes()));
     let state = B64URL.encode(rand::random::<[u8; 16]>());
+    let mut client = None;
 
-    let creds = match p.kind.as_str() {
+    let (url, redirect, port) = match p.kind.as_str() {
         "codex" => {
             let redirect = "http://localhost:1455/auth/callback";
             let url = reqwest::Url::parse_with_params(
@@ -341,19 +360,7 @@ pub async fn login(cfg: &Config, name: &str) -> Result<()> {
                     ("originator", "codex_cli_rs"),
                 ],
             )?;
-            let code = wait_for_code(url.as_str(), Some(1455)).await?;
-            let form = [
-                ("grant_type", "authorization_code"),
-                ("code", code.as_str()),
-                ("redirect_uri", redirect),
-                ("client_id", CODEX_CLIENT_ID),
-                ("code_verifier", verifier.as_str()),
-            ];
-            let v: Value = check(http().post("https://auth.openai.com/oauth/token").form(&form).send().await?)
-                .await?
-                .json()
-                .await?;
-            creds_from_token_response(&v, None)
+            (url, redirect.to_string(), Some(1455))
         }
         "claude" => {
             let redirect = "http://localhost:54545/callback";
@@ -370,15 +377,7 @@ pub async fn login(cfg: &Config, name: &str) -> Result<()> {
                     ("state", &state),
                 ],
             )?;
-            let pasted = wait_for_code(url.as_str(), Some(54545)).await?;
-            // The code may carry the state after '#'.
-            let (code, st) = pasted.split_once('#').unwrap_or((pasted.as_str(), state.as_str()));
-            let body = json!({
-                "grant_type": "authorization_code", "code": code, "redirect_uri": redirect,
-                "client_id": CLAUDE_CLIENT_ID, "code_verifier": verifier, "state": st,
-            });
-            let v: Value = check(http().post(CLAUDE_TOKEN_URL).json(&body).send().await?).await?.json().await?;
-            creds_from_token_response(&v, None)
+            (url, redirect.to_string(), Some(54545))
         }
         "gemini" | "antigravity" => {
             let (client_id, secret) = match (&p.client_id, &p.client_secret) {
@@ -413,45 +412,85 @@ pub async fn login(cfg: &Config, name: &str) -> Result<()> {
                     ("state", &state),
                 ],
             )?;
-            let code = wait_for_code(url.as_str(), port).await?;
-            let form = [
-                ("client_id", client_id.as_str()),
-                ("client_secret", secret.as_str()),
-                ("code", code.as_str()),
-                ("code_verifier", verifier.as_str()),
-                ("grant_type", "authorization_code"),
-                ("redirect_uri", redirect.as_str()),
-            ];
-            let v: Value = check(http().post("https://oauth2.googleapis.com/token").form(&form).send().await?)
-                .await?
-                .json()
-                .await?;
-            creds_from_token_response(&v, None)
+            client = Some((client_id, secret));
+            (url, redirect, port)
         }
         other => bail!("provider '{name}' (kind {other}) uses an API key, no login needed"),
     };
-    if creds.access_token.is_empty() {
-        bail!("login failed: no access token returned");
-    }
-    let path = cfg.path("auth").join(format!("{name}.json"));
-    std::fs::create_dir_all(path.parent().unwrap())?;
-    write_private(&path, &serde_json::to_string_pretty(&creds)?)?;
-    println!("Saved {}", path.display());
-    Ok(())
+    Ok(Flow {
+        url: url.to_string(),
+        port,
+        name: name.to_string(),
+        kind: p.kind.clone(),
+        redirect,
+        verifier,
+        state,
+        client,
+    })
 }
 
-/// Print the link, then take the code from the local redirect (if the browser
-/// is on this machine) or from a pasted redirect URL / code.
-async fn wait_for_code(url: &str, port: Option<u16>) -> Result<String> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-    println!("Open this link and sign in:\n\n{url}\n");
-    println!("Then paste the URL you were redirected to (or the code) here:");
+impl Flow {
+    /// Exchange the pasted redirect URL / code for tokens and save them.
+    pub async fn finish(&self, cfg: &Config, pasted: &str) -> Result<PathBuf> {
+        let pasted = extract_code(pasted).context("no authorization code received")?;
+        let redirect = self.redirect.as_str();
+        let v: Value = match self.kind.as_str() {
+            "codex" => {
+                let form = [
+                    ("grant_type", "authorization_code"),
+                    ("code", pasted.as_str()),
+                    ("redirect_uri", redirect),
+                    ("client_id", CODEX_CLIENT_ID),
+                    ("code_verifier", self.verifier.as_str()),
+                ];
+                check(http().post("https://auth.openai.com/oauth/token").form(&form).send().await?)
+                    .await?
+                    .json()
+                    .await?
+            }
+            "claude" => {
+                // The code may carry the state after '#'.
+                let (code, st) = pasted.split_once('#').unwrap_or((pasted.as_str(), self.state.as_str()));
+                let body = json!({
+                    "grant_type": "authorization_code", "code": code, "redirect_uri": redirect,
+                    "client_id": CLAUDE_CLIENT_ID, "code_verifier": self.verifier, "state": st,
+                });
+                check(http().post(CLAUDE_TOKEN_URL).json(&body).send().await?).await?.json().await?
+            }
+            _ => {
+                let (client_id, secret) = self.client.as_ref().context("no OAuth client")?;
+                let form = [
+                    ("client_id", client_id.as_str()),
+                    ("client_secret", secret.as_str()),
+                    ("code", pasted.as_str()),
+                    ("code_verifier", self.verifier.as_str()),
+                    ("grant_type", "authorization_code"),
+                    ("redirect_uri", redirect),
+                ];
+                check(http().post("https://oauth2.googleapis.com/token").form(&form).send().await?)
+                    .await?
+                    .json()
+                    .await?
+            }
+        };
+        let creds = creds_from_token_response(&v, None);
+        if creds.access_token.is_empty() {
+            bail!("login failed: no access token returned");
+        }
+        let path = cfg.path("auth").join(format!("{}.json", self.name));
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        write_private(&path, &serde_json::to_string_pretty(&creds)?)?;
+        Ok(path)
+    }
 
-    let listener = match port {
-        Some(p) => tokio::net::TcpListener::bind(("127.0.0.1", p)).await.ok(),
-        None => None,
-    };
-    let from_browser = async {
+    /// Wait for the browser to hit the local redirect; returns that URL.
+    /// Never resolves when the provider has no local redirect or the port is taken.
+    pub async fn callback(&self) -> String {
+        use tokio::io::AsyncWriteExt;
+        let listener = match self.port {
+            Some(p) => tokio::net::TcpListener::bind(("127.0.0.1", p)).await.ok(),
+            None => None,
+        };
         let Some(l) = listener else { return std::future::pending().await };
         loop {
             let Ok((mut sock, _)) = l.accept().await else { continue };
@@ -462,12 +501,21 @@ async fn wait_for_code(url: &str, port: Option<u16>) -> Result<String> {
             if !target.contains("code=") {
                 continue;
             }
-            let body = "Signed in. You can close this tab.";
+            let body = "Sign-in received. You can close this tab and return to kron.";
             let reply = format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{body}", body.len());
             sock.write_all(reply.as_bytes()).await.ok();
             return format!("http://localhost{target}");
         }
-    };
+    }
+}
+
+/// `kron login`: print the link, then take the code from the local redirect
+/// (if the browser is on this machine) or from a pasted redirect URL / code.
+pub async fn login(cfg: &Config, name: &str) -> Result<()> {
+    use tokio::io::AsyncBufReadExt;
+    let flow = begin(cfg, name)?;
+    println!("Open this link and sign in:\n\n{}\n", flow.url);
+    println!("Then paste the URL you were redirected to (or the code) here:");
     let from_stdin = async {
         let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
         loop {
@@ -478,8 +526,10 @@ async fn wait_for_code(url: &str, port: Option<u16>) -> Result<String> {
             }
         }
     };
-    let got = tokio::select! { s = from_browser => s, s = from_stdin => s };
-    extract_code(&got).context("no authorization code received")
+    let got = tokio::select! { s = flow.callback() => s, s = from_stdin => s };
+    let path = flow.finish(cfg, &got).await?;
+    println!("Saved {}", path.display());
+    Ok(())
 }
 
 pub fn extract_code(s: &str) -> Option<String> {

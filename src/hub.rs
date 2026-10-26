@@ -51,7 +51,8 @@ impl Sink for Run {
 }
 
 pub struct Hub {
-    cfg: Arc<Config>,
+    /// Replaced when the config is saved from the web UI.
+    cfg: std::sync::RwLock<Arc<Config>>,
     store: Store,
     name: String,
     workdir: std::path::PathBuf,
@@ -59,6 +60,19 @@ pub struct Hub {
     pending: Mutex<HashMap<String, oneshot::Sender<Value>>>,
     runs: Mutex<HashMap<String, Arc<Run>>>,
     thread_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    logins: Mutex<HashMap<String, Login>>,
+}
+
+struct Login {
+    flow: Arc<crate::auth::Flow>,
+    status: Arc<Mutex<Value>>,
+    task: tokio::task::AbortHandle,
+}
+
+impl Hub {
+    fn cfg(&self) -> Arc<Config> {
+        self.cfg.read().unwrap().clone()
+    }
 }
 
 type Shared = Arc<Hub>;
@@ -73,11 +87,12 @@ pub async fn serve(cfg: Arc<Config>, workdir: std::path::PathBuf) -> Result<()> 
         store: Store::new(cfg.path("threads")),
         name: cfg.node_name(),
         workdir,
-        cfg,
+        cfg: std::sync::RwLock::new(cfg),
         nodes: Default::default(),
         pending: Default::default(),
         runs: Default::default(),
         thread_locks: Default::default(),
+        logins: Default::default(),
     });
     let app = Router::new()
         .route("/", get(|| async { Html(include_str!("ui.html")) }))
@@ -100,6 +115,9 @@ pub async fn serve(cfg: Arc<Config>, workdir: std::path::PathBuf) -> Result<()> 
             "/icon-512.png",
             get(|| async { ([("content-type", "image/png")], &include_bytes!("assets/icon-512.png")[..]) }),
         )
+        .route("/api/config", get(get_config).put(put_config))
+        .route("/api/login/:provider", get(login_status).post(login_start))
+        .route("/api/login/:provider/code", post(login_code))
         .route("/api/nodes/:name/hello", post(node_hello))
         .route("/api/nodes/:name/poll", get(node_poll))
         .route("/api/nodes/:name/result", post(node_result))
@@ -118,7 +136,8 @@ struct TokenQuery {
 }
 
 fn authorized(hub: &Hub, headers: &HeaderMap, q: &TokenQuery) -> bool {
-    let Some(expected) = hub.cfg.hub.token.as_deref().filter(|t| !t.is_empty()) else { return true };
+    let cfg = hub.cfg();
+    let Some(expected) = cfg.hub.token.as_deref().filter(|t| !t.is_empty()) else { return true };
     let given = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -147,7 +166,7 @@ impl Hub {
         let mut nodes = self.nodes.lock().unwrap();
         nodes.retain(|_, n| n.last_seen.elapsed() < NODE_TTL * 10);
         let mut out = vec![
-            json!({"name": self.name, "os": std::env::consts::OS, "cwd": self.workdir, "browser": !self.cfg.browser.disabled && crate::browser::find_chrome(&self.cfg.browser).is_some(), "hub": true}),
+            json!({"name": self.name, "os": std::env::consts::OS, "cwd": self.workdir, "browser": !self.cfg().browser.disabled && crate::browser::find_chrome(&self.cfg().browser).is_some(), "hub": true}),
         ];
         for (name, n) in nodes.iter() {
             if n.last_seen.elapsed() < NODE_TTL && n.info["ephemeral"] != true {
@@ -164,15 +183,23 @@ impl Hub {
 
 async fn info(State(hub): State<Shared>, headers: HeaderMap, Query(q): Query<TokenQuery>) -> Response {
     guard!(hub, headers, q);
-    let providers: Vec<Value> =
-        hub.cfg.providers.iter().map(|(n, p)| json!({"name": n, "kind": p.kind, "model": p.model})).collect();
+    let cfg = hub.cfg();
+    let providers: Vec<Value> = cfg
+        .providers
+        .iter()
+        .map(|(n, p)| {
+            let oauth = matches!(p.kind.as_str(), "codex" | "claude" | "gemini" | "antigravity");
+            let logged_in = oauth && crate::auth::Auth::new(&cfg, n, &p.kind, p).is_ok_and(|a| a.logged_in());
+            json!({"name": n, "kind": p.kind, "model": p.model, "oauth": oauth, "logged_in": logged_in})
+        })
+        .collect();
     Json(json!({
         "hub": hub.name,
-        "default": hub.cfg.default_provider().ok(),
+        "default": cfg.default_provider().ok(),
         "nodes": hub.online_nodes(),
         "providers": providers,
-        "agents": hub.cfg.agents.keys().collect::<Vec<_>>(),
-        "sites": hub.cfg.sites.keys().collect::<Vec<_>>(),
+        "agents": cfg.agents.keys().collect::<Vec<_>>(),
+        "sites": cfg.sites.keys().collect::<Vec<_>>(),
     }))
     .into_response()
 }
@@ -209,6 +236,110 @@ async fn merge(
     }
 }
 
+// ── Settings & sign-in ───────────────────────────────────────────────────────
+
+async fn get_config(State(hub): State<Shared>, headers: HeaderMap, Query(q): Query<TokenQuery>) -> Response {
+    guard!(hub, headers, q);
+    let cfg = hub.cfg();
+    let text = std::fs::read_to_string(&cfg.file).unwrap_or_else(|_| crate::config::EXAMPLE.to_string());
+    Json(json!({"path": cfg.file, "text": text})).into_response()
+}
+
+/// Save config.toml and apply it without a restart (listen address and
+/// token take effect on the next start).
+async fn put_config(
+    State(hub): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    Json(body): Json<Value>,
+) -> Response {
+    guard!(hub, headers, q);
+    let text = body["text"].as_str().unwrap_or("");
+    let file = hub.cfg().file.clone();
+    let new = match Config::parse(text, file.clone()) {
+        Ok(c) => c,
+        Err(e) => return err(format!("{e:#}")),
+    };
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).ok();
+    }
+    if let Err(e) = std::fs::write(&file, text) {
+        return err(e);
+    }
+    *hub.cfg.write().unwrap() = Arc::new(new);
+    Json(json!({"ok": true})).into_response()
+}
+
+/// Start an OAuth sign-in. The browser's redirect to localhost is caught when
+/// it runs on this machine; otherwise the UI posts the pasted URL / code.
+async fn login_start(
+    State(hub): State<Shared>,
+    Path(provider): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    guard!(hub, headers, q);
+    let cfg = hub.cfg();
+    let flow = match crate::auth::begin(&cfg, &provider) {
+        Ok(f) => Arc::new(f),
+        Err(e) => return err(format!("{e:#}")),
+    };
+    if let Some(old) = hub.logins.lock().unwrap().remove(&provider) {
+        old.task.abort();
+    }
+    let status = Arc::new(Mutex::new(json!({"state": "waiting"})));
+    let (flow2, status2) = (flow.clone(), status.clone());
+    // Bind the callback port before replying, so a fast redirect is not missed.
+    let task = tokio::spawn(async move {
+        let url = flow2.callback().await;
+        let result = flow2.finish(&cfg, &url).await;
+        *status2.lock().unwrap() = match result {
+            Ok(_) => json!({"state": "done"}),
+            Err(e) => json!({"state": "error", "error": format!("{e:#}")}),
+        };
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let url = flow.url.clone();
+    let paste = flow.port.is_none();
+    hub.logins.lock().unwrap().insert(provider, Login { flow, status, task: task.abort_handle() });
+    Json(json!({"url": url, "paste": paste})).into_response()
+}
+
+async fn login_status(
+    State(hub): State<Shared>,
+    Path(provider): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    guard!(hub, headers, q);
+    let v = hub.logins.lock().unwrap().get(&provider).map(|l| l.status.lock().unwrap().clone());
+    Json(v.unwrap_or(json!({"state": "none"}))).into_response()
+}
+
+async fn login_code(
+    State(hub): State<Shared>,
+    Path(provider): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    Json(body): Json<Value>,
+) -> Response {
+    guard!(hub, headers, q);
+    let Some((flow, status)) = hub.logins.lock().unwrap().get(&provider).map(|l| (l.flow.clone(), l.status.clone()))
+    else {
+        return err("no sign-in in progress");
+    };
+    match flow.finish(&hub.cfg(), body["code"].as_str().unwrap_or("")).await {
+        Ok(_) => {
+            if let Some(l) = hub.logins.lock().unwrap().remove(&provider) {
+                l.task.abort();
+            }
+            *status.lock().unwrap() = json!({"state": "done"});
+            Json(json!({"state": "done"})).into_response()
+        }
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
 // ── Runs ──────────────────────────────────────────────────────────────────────
 
 async fn start_run(
@@ -225,8 +356,8 @@ async fn start_run(
         return err(e);
     }
     let exec: Arc<dyn Executor> = match req.node.as_deref() {
-        None | Some("") => Arc::new(Local::new(&hub.cfg, hub.workdir.clone())),
-        Some(n) if n == hub.name => Arc::new(Local::new(&hub.cfg, hub.workdir.clone())),
+        None | Some("") => Arc::new(Local::new(&hub.cfg(), hub.workdir.clone())),
+        Some(n) if n == hub.name => Arc::new(Local::new(&hub.cfg(), hub.workdir.clone())),
         Some(n) => match Remote::connect(&hub, n) {
             Ok(r) => Arc::new(r),
             Err(e) => return err(e),
@@ -251,7 +382,7 @@ async fn start_run(
     let work = tokio::spawn(async move {
         let lock = hub2.thread_locks.lock().unwrap().entry(req.thread.clone()).or_default().clone();
         let _one_turn_at_a_time = lock.lock().await;
-        turn(&hub2.cfg, &hub2.store, &req, exec, run2.as_ref()).await
+        turn(&hub2.cfg(), &hub2.store, &req, exec, run2.as_ref()).await
     });
     *run.abort.lock().unwrap() = Some(work.abort_handle());
     let hub2 = hub.clone();
