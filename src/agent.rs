@@ -50,13 +50,20 @@ impl Executor for Local {
 }
 
 pub fn environment(node: &str, cwd: &std::path::Path) -> String {
-    let mut s = format!(
-        "<environment>\nmachine: {node}\nos: {} ({})\ncwd: {}\nshell: {}\n</environment>",
-        std::env::consts::OS,
-        std::env::consts::ARCH,
-        cwd.display(),
-        if cfg!(windows) { "powershell" } else { "sh" },
-    );
+    let mut s = match crate::sandbox::get() {
+        Some(sb) => format!(
+            "<environment>\nmachine: {node}\nos: {}\ncwd: {}\nshell: bash\n</environment>",
+            sb.describe(),
+            sb.guest_path(cwd).display(),
+        ),
+        None => format!(
+            "<environment>\nmachine: {node}\nos: {} ({})\ncwd: {}\nshell: {}\n</environment>",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            cwd.display(),
+            if cfg!(windows) { "powershell" } else { "sh" },
+        ),
+    };
     for name in ["AGENTS.md", "CLAUDE.md", "GEMINI.md"] {
         if let Ok(text) = std::fs::read_to_string(cwd.join(name)) {
             s.push_str(&format!(

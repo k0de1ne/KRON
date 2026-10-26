@@ -91,7 +91,17 @@ public class MainActivity extends Activity {
 
     private void askPermissions() {
         if (Build.VERSION.SDK_INT >= 33) requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, 1);
+        if (Build.VERSION.SDK_INT < 30) requestPermissions(new String[] {Manifest.permission.WRITE_EXTERNAL_STORAGE}, 2);
         SharedPreferences p = getSharedPreferences("kron", MODE_PRIVATE);
+        // All files access makes Internal storage/kron the agent's /shared folder.
+        if (Build.VERSION.SDK_INT >= 30 && !p.getBoolean("askedStorage", false) && !KronService.hasStorage(this)) {
+            p.edit().putBoolean("askedStorage", true).apply();
+            try {
+                startActivity(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        Uri.parse("package:" + getPackageName())));
+            } catch (Exception ignored) {
+            }
+        }
         PowerManager pm = getSystemService(PowerManager.class);
         if (!p.getBoolean("askedBattery", false) && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
             p.edit().putBoolean("askedBattery", true).apply();
@@ -111,6 +121,12 @@ public class MainActivity extends Activity {
         getWindow().setNavigationBarColor(bg);
         int flags = dark ? 0 : View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
         getWindow().getDecorView().setSystemUiVisibility(flags);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        KronService.storageChanged(this);
     }
 
     @Override

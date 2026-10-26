@@ -309,7 +309,10 @@ async fn run_inner(ctx: &Ctx, name: &str, a: &Value) -> anyhow::Result<String> {
     let n = |k: &str, d: u64| a[k].as_u64().or_else(|| a[k].as_f64().map(|f| f as u64)).unwrap_or(d);
     let path = |k: &str| -> PathBuf {
         match s(k) {
-            Some(p) if Path::new(p).is_absolute() => PathBuf::from(p),
+            Some(p) if Path::new(p).is_absolute() => match crate::sandbox::get() {
+                Some(sb) => sb.host_path(Path::new(p)),
+                None => PathBuf::from(p),
+            },
             Some(p) => ctx.cwd.join(p),
             None => ctx.cwd.clone(),
         }

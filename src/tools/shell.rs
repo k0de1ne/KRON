@@ -13,9 +13,11 @@ use tokio::process::{Child, ChildStdin, Command};
 
 const MAX_OUTPUT: usize = 16_000;
 
-/// The user's shell running `command`.
+/// The user's shell running `command` (on Android, inside the agent's Linux).
 pub fn command(cmd: &str, cwd: &Path) -> Command {
-    let mut c = if cfg!(windows) {
+    let mut c = if let Some(sb) = crate::sandbox::get() {
+        sb.command(cmd, cwd)
+    } else if cfg!(windows) {
         let mut c = Command::new("powershell.exe");
         c.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", cmd]);
         c
@@ -25,11 +27,15 @@ pub fn command(cmd: &str, cwd: &Path) -> Command {
         c.args(["-c", cmd]);
         c
     };
-    c.current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    if crate::sandbox::get().is_none() {
+        c.current_dir(cwd);
+    }
+    c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     c
 }
 
 pub async fn run(cmd: &str, cwd: &Path, timeout_ms: u64) -> Result<String> {
+    ready().await?;
     let child = command(cmd, cwd).spawn().with_context(|| format!("cannot start shell in {}", cwd.display()))?;
     match tokio::time::timeout(Duration::from_millis(timeout_ms), child.wait_with_output()).await {
         Ok(out) => {
@@ -39,6 +45,13 @@ pub async fn run(cmd: &str, cwd: &Path, timeout_ms: u64) -> Result<String> {
             Ok(format!("Exit code: {}\nOutput:\n{}", out.status.code().unwrap_or(-1), truncate(&text)))
         }
         Err(_) => Ok(format!("Command timed out after {} ms and was killed.", timeout_ms)),
+    }
+}
+
+async fn ready() -> Result<()> {
+    match crate::sandbox::get() {
+        Some(sb) => sb.ready().await.context("preparing the Linux environment"),
+        None => Ok(()),
     }
 }
 
@@ -73,6 +86,7 @@ fn sessions() -> &'static tokio::sync::Mutex<HashMap<u32, Session>> {
 }
 
 pub async fn exec_start(cmd: &str, cwd: &Path, yield_ms: u64) -> Result<String> {
+    ready().await?;
     let mut child = command(cmd, cwd).stdin(Stdio::piped()).spawn()?;
     let output = Arc::new(Mutex::new(Vec::new()));
     if let Some(out) = child.stdout.take() {

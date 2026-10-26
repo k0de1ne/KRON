@@ -6,6 +6,7 @@ mod hub;
 mod llm;
 mod local;
 mod node;
+mod sandbox;
 mod store;
 mod tools;
 mod turn;
@@ -124,7 +125,17 @@ async fn real_main() -> Result<()> {
                 init(&cfg)?;
             }
             let cfg = Arc::new(Config::load(Some(&cfg.file))?);
-            let dir = workdir(&cfg, None)?;
+            let mut dir = workdir(&cfg, None)?;
+            if let Some(sb) = sandbox::get() {
+                // The agent works in the container's /root; fetch the rootfs now so it is ready.
+                dir = sb.home();
+                std::fs::create_dir_all(&dir)?;
+                tokio::spawn(async move {
+                    if let Err(e) = sb.ready().await {
+                        eprintln!("sandbox: {e:#}");
+                    }
+                });
+            }
             if let Some(client) = hub {
                 let (cfg, name, dir) = (cfg.clone(), cfg.node_name(), dir.clone());
                 tokio::spawn(async move {

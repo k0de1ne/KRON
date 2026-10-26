@@ -18,6 +18,18 @@ Copyright OpenAI. Licensed under the Apache License, Version 2.0
 (http://www.apache.org/licenses/LICENSE-2.0). Distributed on an "AS IS" basis,
 without warranties or conditions of any kind.
 
+## Bundled in kron.apk
+
+`android/proot.sh` puts these Termux builds into the APK unmodified, except
+that the name `libtalloc.so.2` is rewritten to `libtalloc.so`:
+
+- PRoot — GNU GPL v2, https://github.com/termux/proot (`libproot.so`, `libproot-loader.so`)
+- talloc — GNU LGPL v3, https://talloc.samba.org (`libtalloc.so`)
+- libandroid-shmem — BSD-3-Clause, https://github.com/termux/libandroid-shmem (`libandroid-shmem.so`)
+
+Sources and build recipes: https://github.com/termux/termux-packages.
+The Ubuntu rootfs is downloaded at run time from cdimage.ubuntu.com.
+
 ## References
 
 Request details of the subscription adapters (endpoints, OAuth parameters,
