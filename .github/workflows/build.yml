@@ -48,7 +48,7 @@ jobs:
           VERSION_CODE: ${{ github.run_number }}
           VERSION_NAME: ${{ github.ref_name }}-${{ github.run_number }}
         run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" > /dev/null
+          (yes 2>/dev/null || true) | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" > /dev/null
           android/build.sh target/${{ matrix.target }}/release/kron target/${{ matrix.target }}/release/kron.apk
 
       - uses: actions/upload-artifact@v4
