@@ -22,6 +22,39 @@ fn tool(name: &str, description: &str, parameters: Value) -> Tool {
     Tool { name: name.into(), description: description.into(), parameters }
 }
 
+/// A short tool set for small local models: Codex's ten tools and long
+/// descriptions confuse a 1-3B model, these four it can use.
+pub fn small() -> Vec<Tool> {
+    let sh = if cfg!(windows) { "PowerShell" } else { "sh" };
+    vec![
+        tool(
+            "shell",
+            &format!("Run a {sh} command and get its output."),
+            json!({"type": "object", "required": ["command"], "properties": {
+                "command": {"type": "string", "description": "The command, e.g. \"ls -la\""}}}),
+        ),
+        tool(
+            "write_file",
+            "Create or overwrite a text file.",
+            json!({"type": "object", "required": ["path", "content"], "properties": {
+                "path": {"type": "string", "description": "File path, e.g. \"notes/hello.txt\""},
+                "content": {"type": "string", "description": "The full text to write"}}}),
+        ),
+        tool(
+            "read_file",
+            "Read a text file.",
+            json!({"type": "object", "required": ["file_path"], "properties": {
+                "file_path": {"type": "string", "description": "File path"}}}),
+        ),
+        tool(
+            "list_dir",
+            "List files in a folder.",
+            json!({"type": "object", "properties": {
+                "dir_path": {"type": "string", "description": "Folder path; default is the working folder"}}}),
+        ),
+    ]
+}
+
 /// Tool definitions. Names, parameters and descriptions follow the Codex CLI
 /// (openai/codex, Apache-2.0) so models trained on Codex use them well.
 pub fn builtin() -> Vec<Tool> {
@@ -288,7 +321,13 @@ async fn run_inner(ctx: &Ctx, name: &str, a: &Value) -> anyhow::Result<String> {
     }
     match name {
         "shell" => {
-            let command = need("command")?;
+            // Small models sometimes send the argv form.
+            let joined =
+                a["command"].as_array().map(|v| v.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" "));
+            let command = match &joined {
+                Some(c) => c.as_str(),
+                None => need("command")?,
+            };
             let dir = path("workdir");
             if let Some(patch) = apply_patch::from_shell(command) {
                 return apply_patch::apply(&patch, &dir);
@@ -306,6 +345,16 @@ async fn run_inner(ctx: &Ctx, name: &str, a: &Value) -> anyhow::Result<String> {
         "read_file" => {
             need("file_path")?;
             fs::read_file(&path("file_path"), n("offset", 1) as usize, n("limit", 2000) as usize)
+        }
+        "write_file" => {
+            let file = path("path");
+            need("path")?;
+            let content = s("content").unwrap_or("");
+            if let Some(dir) = file.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(&file, content)?;
+            Ok(format!("Wrote {} bytes to {}", content.len(), file.display()))
         }
         "list_dir" => {
             fs::list_dir(&path("dir_path"), n("depth", 2) as usize, n("offset", 1) as usize, n("limit", 500) as usize)

@@ -72,6 +72,13 @@ pub fn environment(node: &str, cwd: &std::path::Path) -> String {
 /// The Codex CLI system prompt (openai/codex, Apache-2.0), lightly adapted.
 const BASE_PROMPT: &str = include_str!("prompts/codex.md");
 
+/// For small local models the Codex prompt is far too long.
+const SMALL_PROMPT: &str = "You are kron, a helpful assistant running on the user's device. \
+You can act on the device with tools: call `shell` to run commands, `write_file` to create files, \
+`read_file` and `list_dir` to look around. When the user asks you to do something, do it with a tool \
+call instead of explaining how. Relative paths are inside the working folder. \
+Reply briefly, in the user's language.";
+
 pub struct Agent {
     cfg: Arc<Config>,
     pub agent: Option<String>,
@@ -80,6 +87,8 @@ pub struct Agent {
     allowed: Vec<String>,
     exec: Arc<dyn Executor>,
     depth: usize,
+    /// A small local model: short prompt, short tool set.
+    small: bool,
 }
 
 impl Agent {
@@ -99,6 +108,7 @@ impl Agent {
             None => cfg.default_provider()?,
         };
         let provider = llm::build(cfg, &provider_name, model.or(a.model.as_deref()))?;
+        let small = cfg.provider(&provider_name)?.kind == "local";
         let mut system = a.system.clone().unwrap_or_default();
         if let Some(f) = &a.system_file {
             let path = if std::path::Path::new(f).is_absolute() { f.into() } else { cfg.home.join(f) };
@@ -112,11 +122,12 @@ impl Agent {
             allowed: a.tools,
             exec,
             depth: 0,
+            small,
         })
     }
 
     fn tools(&self) -> Vec<Tool> {
-        let mut all = tools::builtin();
+        let mut all = if self.small { tools::small() } else { tools::builtin() };
         if self.depth > 0 || self.cfg.agents.is_empty() {
             all.retain(|t| t.name != "spawn_agent");
         }
@@ -137,8 +148,9 @@ impl Agent {
         if !with_tools {
             return self.system.clone();
         }
-        let mut s = format!("{BASE_PROMPT}\n\n{}", self.exec.environment());
-        if self.depth == 0 && !self.cfg.agents.is_empty() {
+        let base = if self.small { SMALL_PROMPT } else { BASE_PROMPT };
+        let mut s = format!("{base}\n\n{}", self.exec.environment());
+        if self.depth == 0 && !self.small && !self.cfg.agents.is_empty() {
             s.push_str("\n\nAgents available to spawn_agent:");
             for (name, a) in &self.cfg.agents {
                 let about =
