@@ -4,6 +4,7 @@ mod browser;
 mod config;
 mod hub;
 mod llm;
+mod local;
 mod node;
 mod store;
 mod tools;
@@ -310,6 +311,7 @@ async fn run(cfg: Arc<Config>, store: Store, hub: Option<node::Client>, args: Ru
         w.abort();
     }
     browser::shutdown().await;
+    local::shutdown().await;
     result
 }
 

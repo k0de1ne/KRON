@@ -73,6 +73,14 @@ impl Hub {
     fn cfg(&self) -> Arc<Config> {
         self.cfg.read().unwrap().clone()
     }
+
+    /// Re-read config.toml (and the models directory).
+    fn reload(&self) -> Result<()> {
+        let file = self.cfg().file.clone();
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        *self.cfg.write().unwrap() = Arc::new(Config::parse(&text, file)?);
+        Ok(())
+    }
 }
 
 type Shared = Arc<Hub>;
@@ -116,6 +124,8 @@ pub async fn serve(cfg: Arc<Config>, workdir: std::path::PathBuf) -> Result<()> 
             get(|| async { ([("content-type", "image/png")], &include_bytes!("assets/icon-512.png")[..]) }),
         )
         .route("/api/config", get(get_config).put(put_config))
+        .route("/api/models", get(models))
+        .route("/api/models/:file", post(model_download).delete(model_delete))
         .route("/api/login/:provider", get(login_status).post(login_start))
         .route("/api/login/:provider/code", post(login_code))
         .route("/api/nodes/:name/hello", post(node_hello))
@@ -338,6 +348,55 @@ async fn login_code(
         }
         Err(e) => err(format!("{e:#}")),
     }
+}
+
+// ── Local models ─────────────────────────────────────────────────────────────
+
+async fn models(State(hub): State<Shared>, headers: HeaderMap, Query(q): Query<TokenQuery>) -> Response {
+    guard!(hub, headers, q);
+    let cfg = hub.cfg();
+    let dir = crate::local::models_dir(&cfg.home);
+    let list: Vec<Value> = crate::local::CATALOG
+        .iter()
+        .map(|m| {
+            json!({
+                "file": m.file, "title": m.title, "note": m.note, "size": m.size,
+                "installed": dir.join(m.file).is_file(),
+                "progress": crate::local::progress(m.file),
+            })
+        })
+        .collect();
+    Json(json!({"models": list, "server": crate::local::find_server().is_some()})).into_response()
+}
+
+async fn model_download(
+    State(hub): State<Shared>,
+    Path(file): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    guard!(hub, headers, q);
+    let hub2 = hub.clone();
+    match crate::local::download(&hub.cfg().home, &file, move || {
+        hub2.reload().ok();
+    }) {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => err(e),
+    }
+}
+
+async fn model_delete(
+    State(hub): State<Shared>,
+    Path(file): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    guard!(hub, headers, q);
+    if let Err(e) = crate::local::remove(&hub.cfg().home, &file).await {
+        return err(format!("{e:#}"));
+    }
+    hub.reload().ok();
+    Json(json!({"ok": true})).into_response()
 }
 
 // ── Runs ──────────────────────────────────────────────────────────────────────

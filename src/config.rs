@@ -28,7 +28,7 @@ pub struct Config {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct ProviderCfg {
-    /// openai | responses | anthropic | codex | claude | gemini | antigravity
+    /// openai | responses | anthropic | codex | claude | gemini | antigravity | local
     pub kind: String,
     pub model: String,
     pub base_url: Option<String>,
@@ -115,6 +115,14 @@ impl Config {
         cfg.file = file;
         for (name, site) in builtin_sites() {
             cfg.sites.entry(name.to_string()).or_insert(site);
+        }
+        // Downloaded local models are providers without any config.
+        for (name, stem) in crate::local::installed(&cfg.home) {
+            cfg.providers.entry(name).or_insert(ProviderCfg {
+                kind: "local".into(),
+                model: stem,
+                ..Default::default()
+            });
         }
         Ok(cfg)
     }

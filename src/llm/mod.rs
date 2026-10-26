@@ -55,6 +55,7 @@ pub fn build(cfg: &Config, name: &str, model: Option<&str>) -> Result<Arc<dyn Pr
         "responses" => Arc::new(responses::Responses::with_key(&p)),
         "codex" => Arc::new(responses::Responses::codex(&p, auth("codex")?)),
         "gemini" | "antigravity" => Arc::new(gemini::Gemini::new(&p, auth(&p.kind)?)),
+        "local" => Arc::new(crate::local::Local::new(cfg, &p)),
         other => bail!("provider '{name}': unknown kind '{other}'"),
     })
 }
