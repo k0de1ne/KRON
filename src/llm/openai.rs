@@ -106,6 +106,7 @@ impl Provider for OpenAi {
                 text.push_str(t);
             }
             if let Some(t) = delta["reasoning_content"].as_str() {
+                sink.emit(Event::Reasoning { content: t.to_string() });
                 reasoning.push_str(t);
             }
             for dc in delta["tool_calls"].as_array().into_iter().flatten() {

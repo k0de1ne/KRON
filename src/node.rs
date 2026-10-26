@@ -139,11 +139,21 @@ pub async fn work(
             let (client, local, path) = (client.clone(), local.clone(), path.clone());
             tokio::spawn(async move {
                 let id = job["id"].clone();
+                // A thread can have its own working folder on this machine.
+                let local = match job["cwd"].as_str().filter(|c| !c.is_empty()) {
+                    Some(c) => Arc::new(Local::new(&local.cfg, crate::files::resolve(&local.ctx.cwd, c))),
+                    None => local,
+                };
                 let result = match job["kind"].as_str() {
                     Some("tool") => {
                         let name = job["name"].as_str().unwrap_or("");
                         json!({"id": id, "output": local.run_tool(name, &job["args"]).await})
                     }
+                    Some("files") => match local.files(&job["req"]).await {
+                        Ok(v) => json!({"id": id, "output": v}),
+                        Err(e) => json!({"id": id, "error": format!("{e:#}")}),
+                    },
+                    Some("env") => json!({"id": id, "output": local.environment()}),
                     Some("web") => {
                         let site = job["site"].as_str().unwrap_or("chatgpt");
                         match local.web_chat(site, job["prompt"].as_str().unwrap_or(""), job["url"].as_str()).await {

@@ -56,6 +56,10 @@ impl Responses {
         if let Some(e) = &self.cfg.reasoning_effort {
             body["reasoning"] = json!({"effort": e});
         }
+        if self.oauth.is_some() {
+            // Codex models always reason; ask for the summaries the Codex CLI shows.
+            body["reasoning"]["summary"] = json!("auto");
+        }
         for attempt in 0..2 {
             let mut rb =
                 http().post(format!("{}/responses", self.base)).header("accept", "text/event-stream").json(&body);
@@ -158,10 +162,20 @@ impl Provider for Responses {
             .collect();
         let resp = self.post(req.system, to_input(req.messages), tools).await?;
         let mut text = String::new();
+        let mut reasoning = String::new();
         let mut tool_calls = Vec::new();
         sse(resp, |_, data| {
             let Ok(v) = serde_json::from_str::<Value>(data) else { return Ok(()) };
             match v["type"].as_str().unwrap_or("") {
+                "response.reasoning_summary_text.delta" => {
+                    let d = v["delta"].as_str().unwrap_or("");
+                    sink.emit(Event::Reasoning { content: d.to_string() });
+                    reasoning.push_str(d);
+                }
+                "response.reasoning_summary_part.added" if !reasoning.is_empty() => {
+                    sink.emit(Event::Reasoning { content: "\n\n".into() });
+                    reasoning.push_str("\n\n");
+                }
                 "response.output_text.delta" => {
                     let d = v["delta"].as_str().unwrap_or("");
                     sink.emit(Event::Text { content: d.to_string() });
@@ -192,7 +206,8 @@ impl Provider for Responses {
             Ok(())
         })
         .await?;
-        Ok(Response { text: Some(text).filter(|t| !t.is_empty()), tool_calls, reasoning: None })
+        let reasoning = Some(reasoning).filter(|r| !r.is_empty());
+        Ok(Response { text: Some(text).filter(|t| !t.is_empty()), tool_calls, reasoning })
     }
 
     fn has_web_search(&self) -> bool {

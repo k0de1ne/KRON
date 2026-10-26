@@ -3,12 +3,35 @@
 use crate::config::Config;
 use crate::llm::{self, Provider, Request};
 use crate::store::repair;
-use crate::tools::{self, AGENT_SIDE};
-use crate::types::{Event, Message, NullSink, Sink, Tool, ToolCall, preview};
+use crate::tools::{self, AGENT_SIDE, READ_ONLY};
+use crate::types::{Ask, Event, Message, Sink, Tool, ToolCall, new_id, preview};
 use anyhow::Result;
 use futures::future::join_all;
 use serde_json::Value;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// What the agent may do without asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Access {
+    /// Everything (the default, and the only choice without someone to ask).
+    #[default]
+    Full,
+    /// Commands and file changes wait for the person's approval.
+    Ask,
+    /// Only tools that look: no commands, no edits.
+    ReadOnly,
+}
+
+impl Access {
+    pub fn parse(s: &str) -> Access {
+        match s {
+            "ask" => Access::Ask,
+            "read" | "read-only" | "readonly" => Access::ReadOnly,
+            _ => Access::Full,
+        }
+    }
+}
 
 /// Where tools run: this process, or a node connected to the hub.
 #[async_trait::async_trait]
@@ -20,6 +43,8 @@ pub trait Executor: Send + Sync {
     fn environment(&self) -> String;
     /// One turn of a browser-driven web chat. Returns (answer, conversation url).
     async fn web_chat(&self, site: &str, prompt: &str, url: Option<&str>) -> Result<(String, String)>;
+    /// Browse, read and upload files for the UI (see `files::handle`).
+    async fn files(&self, req: &Value) -> Result<Value>;
 }
 
 pub struct Local {
@@ -46,6 +71,10 @@ impl Executor for Local {
     }
     async fn web_chat(&self, site: &str, prompt: &str, url: Option<&str>) -> Result<(String, String)> {
         crate::browser::web_chat(&self.cfg, site, prompt, url).await
+    }
+    async fn files(&self, req: &Value) -> Result<Value> {
+        let (cwd, req) = (self.ctx.cwd.clone(), req.clone());
+        tokio::task::spawn_blocking(move || crate::files::handle(&cwd, &req)).await?
     }
 }
 
@@ -96,6 +125,40 @@ pub struct Agent {
     depth: usize,
     /// A small local model: short prompt, short tool set.
     small: bool,
+    pub access: Access,
+    /// "Allow everything" was answered once: shared with sub-agents for the rest of the run.
+    allow_all: Arc<AtomicBool>,
+    /// Parallel tool calls ask one at a time, so one answer can cover the rest.
+    asking: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// A sub-agent's steps, shown under the spawn_agent call that started it.
+struct ChildSink<'a> {
+    parent: &'a dyn Sink,
+    call: String,
+}
+
+impl Sink for ChildSink<'_> {
+    fn emit(&self, e: Event) {
+        match e {
+            Event::ToolStart { id, name, args, parent } => {
+                self.parent.emit(Event::ToolStart { id, name, args, parent: parent.or(Some(self.call.clone())) })
+            }
+            Event::ToolEnd { id, name, output, parent } => {
+                self.parent.emit(Event::ToolEnd { id, name, output, parent: parent.or(Some(self.call.clone())) })
+            }
+            Event::Ask(_) | Event::Answered { .. } => self.parent.emit(e),
+            _ => {}
+        }
+    }
+
+    fn can_ask(&self) -> bool {
+        self.parent.can_ask()
+    }
+
+    fn ask(&self, ask: Ask) -> Option<tokio::sync::oneshot::Receiver<String>> {
+        self.parent.ask(ask)
+    }
 }
 
 impl Agent {
@@ -104,6 +167,7 @@ impl Agent {
         agent: Option<&str>,
         provider: Option<&str>,
         model: Option<&str>,
+        effort: Option<&str>,
         exec: Arc<dyn Executor>,
     ) -> Result<Agent> {
         let a = match agent {
@@ -114,7 +178,7 @@ impl Agent {
             Some(p) => p,
             None => cfg.default_provider()?,
         };
-        let provider = llm::build(cfg, &provider_name, model.or(a.model.as_deref()))?;
+        let provider = llm::build_with(cfg, &provider_name, model.or(a.model.as_deref()), effort)?;
         let small = cfg.provider(&provider_name)?.kind == "local";
         let mut system = a.system.clone().unwrap_or_default();
         if let Some(f) = &a.system_file {
@@ -130,10 +194,13 @@ impl Agent {
             exec,
             depth: 0,
             small,
+            access: Access::Full,
+            allow_all: Default::default(),
+            asking: Default::default(),
         })
     }
 
-    fn tools(&self) -> Vec<Tool> {
+    fn tools(&self, interactive: bool) -> Vec<Tool> {
         let mut all = if self.small { tools::small() } else { tools::builtin() };
         if self.depth > 0 || self.cfg.agents.is_empty() {
             all.retain(|t| t.name != "spawn_agent");
@@ -146,7 +213,13 @@ impl Agent {
             all.push(ext);
         }
         if !self.allowed.is_empty() {
-            all.retain(|t| self.allowed.contains(&t.name));
+            all.retain(|t| self.allowed.contains(&t.name) || t.name == "ask_user");
+        }
+        if !interactive {
+            all.retain(|t| t.name != "ask_user");
+        }
+        if self.access == Access::ReadOnly {
+            all.retain(|t| READ_ONLY.contains(&t.name.as_str()));
         }
         all
     }
@@ -164,6 +237,17 @@ impl Agent {
                     a.system.as_deref().map(|t| preview(t.lines().next().unwrap_or(""), 120)).unwrap_or_default();
                 s.push_str(&format!("\n- {name}: {about}"));
             }
+        }
+        match self.access {
+            Access::ReadOnly => s.push_str(
+                "\n\n<permissions>Read-only: you can look at files and the web, but cannot run commands or \
+                change files. If the task needs changes, describe them instead.</permissions>",
+            ),
+            Access::Ask => s.push_str(
+                "\n\n<permissions>The user approves each command and file change. If one is declined, do not \
+                retry it; adjust the plan or ask.</permissions>",
+            ),
+            Access::Full => {}
         }
         if !self.system.is_empty() {
             s.push_str(&format!("\n\n{}", self.system));
@@ -187,7 +271,7 @@ impl Agent {
         sink: &dyn Sink,
         save: &(dyn Fn(&Message) + Send + Sync),
     ) -> Result<String> {
-        let tools = self.tools();
+        let tools = self.tools(sink.can_ask());
         let system = self.system_prompt(true);
         let mut messages = repair(history);
         loop {
@@ -213,20 +297,84 @@ impl Agent {
     }
 
     async fn call(&self, tc: &ToolCall, sink: &dyn Sink) -> String {
-        sink.emit(Event::ToolStart { name: tc.name.clone(), args: tc.arguments.to_string() });
-        let output = if AGENT_SIDE.contains(&tc.name.as_str()) {
-            self.call_here(tc).await.unwrap_or_else(|e| format!("error: {e:#}"))
-        } else {
-            self.exec.run_tool(&tc.name, &tc.arguments).await
+        let args = tc.arguments.to_string();
+        sink.emit(Event::ToolStart { id: tc.id.clone(), name: tc.name.clone(), args, parent: None });
+        let output = match self.permit(tc, sink).await {
+            Err(refusal) => refusal,
+            Ok(()) if AGENT_SIDE.contains(&tc.name.as_str()) => {
+                self.call_here(tc, sink).await.unwrap_or_else(|e| format!("error: {e:#}"))
+            }
+            Ok(()) => self.exec.run_tool(&tc.name, &tc.arguments).await,
         };
-        sink.emit(Event::ToolEnd { name: tc.name.clone(), output: output.clone() });
+        sink.emit(Event::ToolEnd { id: tc.id.clone(), name: tc.name.clone(), output: output.clone(), parent: None });
         output
     }
 
-    async fn call_here(&self, tc: &ToolCall) -> Result<String> {
+    /// In "ask" mode, wait for the person to approve a call that changes things.
+    async fn permit(&self, tc: &ToolCall, sink: &dyn Sink) -> Result<(), String> {
+        if self.access == Access::ReadOnly && !READ_ONLY.contains(&tc.name.as_str()) {
+            return Err("error: read-only mode, this tool is not available".into());
+        }
+        if self.access != Access::Ask || !tools::changes_things(&tc.name, &tc.arguments) {
+            return Ok(());
+        }
+        let _one_question_at_a_time = self.asking.lock().await;
+        if self.allow_all.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let ask = Ask {
+            id: new_id(),
+            kind: "approval".into(),
+            name: tc.name.clone(),
+            args: tc.arguments.to_string(),
+            ..Default::default()
+        };
+        let Some(rx) = sink.ask(ask) else {
+            return Err("error: this action needs the user's approval and nobody can give it now".into());
+        };
+        let answer = rx.await.unwrap_or_else(|_| "deny".into());
+        match answer.as_str() {
+            "allow" => Ok(()),
+            "allow_all" => {
+                self.allow_all.store(true, Ordering::Relaxed);
+                Ok(())
+            }
+            other => {
+                let why = other.strip_prefix("deny").unwrap_or(other).trim_start_matches(':').trim();
+                Err(if why.is_empty() {
+                    "The user declined this action. Do not retry it; choose another way or ask.".into()
+                } else {
+                    format!("The user declined this action: {why}")
+                })
+            }
+        }
+    }
+
+    async fn call_here(&self, tc: &ToolCall, sink: &dyn Sink) -> Result<String> {
         let a = &tc.arguments;
         match tc.name.as_str() {
             "update_plan" => Ok("Plan updated".into()),
+            "web_fetch" => {
+                let n = |k: &str, d: u64| a[k].as_u64().or_else(|| a[k].as_f64().map(|f| f as u64)).unwrap_or(d);
+                let url = a["url"].as_str().ok_or_else(|| anyhow::anyhow!("missing 'url'"))?;
+                tools::web::fetch(url, n("offset", 0) as usize, n("max_chars", 20_000).clamp(1000, 100_000) as usize)
+                    .await
+            }
+            "ask_user" => {
+                let question = a["question"].as_str().unwrap_or_default().to_string();
+                let options = a["options"]
+                    .as_array()
+                    .map(|o| o.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                let ask = Ask { id: new_id(), kind: "question".into(), question, options, ..Default::default() };
+                match sink.ask(ask) {
+                    Some(rx) => Ok(match rx.await {
+                        Ok(answer) => format!("The user answered: {answer}"),
+                        Err(_) => "The question was dismissed. Continue with your best judgement.".into(),
+                    }),
+                    None => Ok("The user is not available. Continue with your best judgement.".into()),
+                }
+            }
             "web_search" => {
                 let query = a["query"].as_str().unwrap_or_default();
                 if self.provider.has_web_search() {
@@ -238,9 +386,13 @@ impl Agent {
             "spawn_agent" => {
                 let task = a["task"].as_str().unwrap_or_default().to_string();
                 let name = a["agent"].as_str().map(String::from).or(self.agent.clone());
-                let mut child = Agent::new(&self.cfg, name.as_deref(), None, None, self.exec.clone())?;
+                let mut child = Agent::new(&self.cfg, name.as_deref(), None, None, None, self.exec.clone())?;
                 child.depth = self.depth + 1;
-                let out = Box::pin(child.run(vec![Message::user(task)], &NullSink, &|_| {})).await?;
+                child.access = self.access;
+                child.allow_all = self.allow_all.clone();
+                child.asking = self.asking.clone();
+                let sink = ChildSink { parent: sink, call: tc.id.clone() };
+                let out = Box::pin(child.run(vec![Message::user(task)], &sink, &|_| {})).await?;
                 Ok(if out.is_empty() { "(the agent finished without a final message)".into() } else { out })
             }
             _ => unreachable!(),

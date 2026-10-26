@@ -1,6 +1,6 @@
 //! One user message → answer, in any mode. Shared by the CLI and the hub.
 
-use crate::agent::{Agent, Executor};
+use crate::agent::{Access, Agent, Executor};
 use crate::config::Config;
 use crate::store::Store;
 use crate::types::{Event, Message, Sink};
@@ -23,6 +23,14 @@ pub struct TurnReq {
     pub node: Option<String>,
     /// Web chat site for mode = web (chatgpt, gemini, ...).
     pub site: Option<String>,
+    /// Reasoning effort override (minimal | low | medium | high).
+    pub effort: Option<String>,
+    /// full (default) | ask | read
+    pub access: String,
+    /// Working folder on the node (default: the node's own).
+    pub cwd: Option<String>,
+    /// Someone is watching (the web UI) and can answer approvals and questions.
+    pub interactive: bool,
 }
 
 pub async fn turn(
@@ -53,12 +61,13 @@ pub async fn turn(
             store.set_meta(&req.thread, "web", web)?;
         }
         "chat" => {
-            let agent = Agent::new(cfg, req.agent.as_deref(), req.provider.as_deref(), req.model.as_deref(), exec)?;
+            let agent = new_agent(cfg, req, exec)?;
             let answer = agent.chat(history, sink).await?;
             store.append(&req.thread, &Message::assistant(answer))?;
         }
         _ => {
-            let agent = Agent::new(cfg, req.agent.as_deref(), req.provider.as_deref(), req.model.as_deref(), exec)?;
+            let mut agent = new_agent(cfg, req, exec)?;
+            agent.access = Access::parse(&req.access);
             let thread = req.thread.clone();
             agent
                 .run(history, sink, &|m| {
@@ -70,4 +79,9 @@ pub async fn turn(
         }
     }
     Ok(())
+}
+
+fn new_agent(cfg: &Arc<Config>, req: &TurnReq, exec: Arc<dyn Executor>) -> Result<Agent> {
+    let (agent, provider) = (req.agent.as_deref(), req.provider.as_deref());
+    Agent::new(cfg, agent, provider, req.model.as_deref(), req.effort.as_deref(), exec)
 }
