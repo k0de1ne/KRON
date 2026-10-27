@@ -32,6 +32,7 @@ public class MainActivity extends Activity {
     static final int PORT = 7790;
     static final String UI = "http://127.0.0.1:" + PORT + "/";
     static final int PICK_FILES = 7;
+    static final int VOICE = 8;
     private WebView web;
     private int retries;
     private ValueCallback<Uri[]> fileCallback;
@@ -147,6 +148,15 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == VOICE) {
+            String text = "";
+            if (result == RESULT_OK && data != null) {
+                java.util.ArrayList<String> heard = data.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS);
+                if (heard != null && !heard.isEmpty()) text = heard.get(0);
+            }
+            voiceResult(text, "");
+            return;
+        }
         if (request != PICK_FILES || fileCallback == null) return;
         Uri[] uris = null;
         if (result == RESULT_OK && data != null) {
@@ -162,8 +172,32 @@ public class MainActivity extends Activity {
         fileCallback = null;
     }
 
+    /** Hand recognized speech (or an error) to the web UI's window.kronVoice. */
+    private void voiceResult(String text, String error) {
+        String js = "window.kronVoice&&window.kronVoice(" + org.json.JSONObject.quote(text) + ","
+                + org.json.JSONObject.quote(error) + ")";
+        runOnUiThread(() -> web.evaluateJavascript(js, null));
+    }
+
     /** window.KronAndroid in the web UI. */
     class Bridge {
+        /** Voice input: the WebView has no SpeechRecognition, so the system recognizer listens. */
+        @JavascriptInterface
+        public void listen(String lang) {
+            runOnUiThread(() -> {
+                Intent i = new Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+                i.putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                        android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+                if (lang != null && !lang.isEmpty()) i.putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, lang);
+                i.putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, "Что сделаем?");
+                try {
+                    startActivityForResult(i, VOICE);
+                } catch (Exception e) {
+                    voiceResult("", "На телефоне нет распознавания речи (Google или другого)");
+                }
+            });
+        }
+
         /** A notification when an answer is ready or the agent waits, while the app is in the background. */
         @JavascriptInterface
         public void notice(String title, String text) {

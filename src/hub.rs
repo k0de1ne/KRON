@@ -149,6 +149,19 @@ pub async fn serve(cfg: Arc<Config>, workdir: std::path::PathBuf) -> Result<()> 
         .route("/api/runs/:id/events", get(run_events))
         .route("/api/runs/:id/cancel", post(cancel_run))
         .route("/api/runs/:id/answer", post(answer_run))
+        .route("/api/surfaces", get(surface_list))
+        .route("/api/surfaces/:id", get(surface_get).delete(surface_delete))
+        .route("/api/surfaces/:id/data", post(surface_data))
+        .route("/api/surfaces/:id/undo", post(surface_undo))
+        .route("/api/surfaces/:id/versions", get(surface_versions))
+        .route("/api/surfaces/:id/signal", post(surface_signal))
+        .route("/api/surfaces/:id/exec", post(surface_exec))
+        .route("/api/genui/profile", get(genui_profile))
+        .route("/api/genui/match", get(genui_match))
+        .route("/api/genui/notes", post(genui_note_add))
+        .route("/api/genui/notes/:id", axum::routing::delete(genui_note_delete))
+        .route("/api/genui/templates/:id", axum::routing::delete(genui_template_delete))
+        .route("/api/genui/reset", post(genui_reset))
         .route("/api/files", post(files).layer(DefaultBodyLimit::max(48 << 20)))
         .route("/raw/:token/:node/*path", get(raw_file))
         .route("/manifest.webmanifest", get(manifest))
@@ -591,6 +604,9 @@ async fn start_run(
         match result {
             Ok(Ok(())) => run.emit(Event::Done),
             Ok(Err(e)) => run.emit(Event::Error { message: format!("{e:#}") }),
+            Err(e) if e.is_panic() => {
+                run.emit(Event::Error { message: "internal error in kron (see the hub log)".into() })
+            }
             Err(_) => run.emit(Event::Error { message: "stopped".into() }),
         }
         // Keep finished runs around briefly for late subscribers.
@@ -740,6 +756,288 @@ async fn run_events(
     Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
 }
 
+// ── Generated interfaces ─────────────────────────────────────────────────────
+
+async fn surface_list(State(hub): State<Shared>, headers: HeaderMap, Query(q): Query<TokenQuery>) -> Response {
+    guard!(hub, headers, q);
+    let cfg = hub.cfg();
+    Json(crate::genui::surfaces(&cfg).list()).into_response()
+}
+
+async fn surface_get(
+    State(hub): State<Shared>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    guard!(hub, headers, q);
+    match crate::genui::surfaces(&hub.cfg()).get(&id) {
+        Ok(s) => Json(s.to_client()).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    }
+}
+
+async fn surface_delete(
+    State(hub): State<Shared>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    guard!(hub, headers, q);
+    let surfaces = crate::genui::surfaces(&hub.cfg());
+    if let Ok(s) = surfaces.get(&id)
+        && crate::genui::thread_surface(&hub.store, &s.thread).as_deref() == Some(id.as_str())
+    {
+        hub.store.set_meta(&s.thread, "surface", Value::Null).ok();
+    }
+    match surfaces.delete(&id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err(e),
+    }
+}
+
+/// The person changed values in the interface: {patches: [{path, value}]}.
+async fn surface_data(
+    State(hub): State<Shared>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    Json(body): Json<Value>,
+) -> Response {
+    guard!(hub, headers, q);
+    let patches: Vec<(String, Option<Value>)> = body["patches"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|p| {
+                    (p["path"].as_str().unwrap_or("").to_string(), p.get("value").filter(|v| !v.is_null()).cloned())
+                })
+                .filter(|(p, _)| !p.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if patches.is_empty() {
+        return err("no patches");
+    }
+    match crate::genui::surfaces(&hub.cfg()).patch_data(&id, &patches, "user") {
+        Ok(s) => Json(json!({"version": s.version, "updated": s.updated})).into_response(),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// Undo the last change, or go back to {version}.
+async fn surface_undo(
+    State(hub): State<Shared>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    Json(body): Json<Value>,
+) -> Response {
+    guard!(hub, headers, q);
+    match crate::genui::surfaces(&hub.cfg()).restore(&id, body["version"].as_u64()) {
+        Ok(s) => Json(s.to_client()).into_response(),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+async fn surface_versions(
+    State(hub): State<Shared>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    guard!(hub, headers, q);
+    let list: Vec<Value> = crate::genui::surfaces(&hub.cfg())
+        .versions(&id)
+        .iter()
+        .rev()
+        .map(|v| json!({"version": v.version, "ts": v.ts, "by": v.by, "note": v.note, "title": v.title}))
+        .collect();
+    Json(list).into_response()
+}
+
+/// How the person uses the interface: {kind: open | interact | like | dislike | pin | unpin, used: [component types]}.
+async fn surface_signal(
+    State(hub): State<Shared>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    Json(body): Json<Value>,
+) -> Response {
+    guard!(hub, headers, q);
+    let cfg = hub.cfg();
+    let kind = body["kind"].as_str().unwrap_or("interact").to_string();
+    let used: Vec<String> = body["used"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).take(50).collect())
+        .unwrap_or_default();
+    let count = body["count"].as_u64().unwrap_or(used.len().max(1) as u64).min(100);
+    let s = crate::genui::surfaces(&cfg).update(&id, |s| match kind.as_str() {
+        "open" => s.stats.opens += 1,
+        "like" => s.stats.likes += 1,
+        "dislike" => s.stats.dislikes += 1,
+        "pin" => s.pinned = true,
+        "unpin" => s.pinned = false,
+        _ => {
+            s.stats.interactions += count;
+            for u in &used {
+                *s.stats.used.entry(u.clone()).or_default() += 1;
+            }
+        }
+    });
+    match s {
+        Ok(s) => {
+            if kind != "open" && kind != "unpin" {
+                crate::genui::memory(&cfg).signal(&s, &used, &kind).ok();
+            }
+            Json(json!({"pinned": s.pinned, "stats": s.stats})).into_response()
+        }
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// A tool run straight from the interface (a button or the terminal), on the
+/// thread's machine and with its permission rules: read-only threads only
+/// look; outside "full" access, anything that changes things needs the
+/// person's confirmation (`confirmed`, given by the UI after showing it).
+async fn surface_exec(
+    State(hub): State<Shared>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    Json(body): Json<Value>,
+) -> Response {
+    guard!(hub, headers, q);
+    let cfg = hub.cfg();
+    let surfaces = crate::genui::surfaces(&cfg);
+    let s = match surfaces.get(&id) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    };
+    let tool = body["tool"].as_str().unwrap_or("");
+    let args = body["args"].clone();
+    if !["shell", "read_file", "list_dir", "grep_files"].contains(&tool) {
+        return err(format!("'{tool}' cannot run from an interface"));
+    }
+    let settings = hub.store.meta(&s.thread)["settings"].clone();
+    let access = crate::agent::Access::parse(settings["access"].as_str().unwrap_or("ask"));
+    let changes = crate::tools::changes_things(tool, &args);
+    if changes && access == crate::agent::Access::ReadOnly {
+        return (StatusCode::FORBIDDEN, "read-only: this interface cannot run commands").into_response();
+    }
+    if changes && access != crate::agent::Access::Full && body["confirmed"] != true {
+        return (StatusCode::CONFLICT, "needs confirmation").into_response();
+    }
+    let exec = match hub.executor(settings["node"].as_str(), settings["cwd"].as_str(), false).await {
+        Ok(e) => e,
+        Err(e) => return err(format!("{e:#}")),
+    };
+    let started = std::time::Instant::now();
+    let output = exec.run_tool(tool, &args).await;
+    let output = crate::types::preview(&output, 20_000);
+    let ok = if tool == "shell" { output.starts_with("Exit code: 0") } else { !output.starts_with("error") };
+    surfaces
+        .update(&id, |s| {
+            s.audit.push(json!({"ts": crate::types::now_ms(), "tool": tool, "args": args, "ok": ok,
+                "ms": started.elapsed().as_millis() as u64, "by": "user"}))
+        })
+        .ok();
+    Json(json!({"output": output, "ok": ok})).into_response()
+}
+
+async fn genui_profile(State(hub): State<Shared>, headers: HeaderMap, Query(q): Query<TokenQuery>) -> Response {
+    guard!(hub, headers, q);
+    Json(crate::genui::memory(&hub.cfg()).export()).into_response()
+}
+
+#[derive(Deserialize, Default)]
+struct MatchQuery {
+    token: Option<String>,
+    q: Option<String>,
+}
+
+/// While the person types on the start screen: the kind of task and earlier
+/// interfaces that fit it, to reopen instead of building again.
+async fn genui_match(State(hub): State<Shared>, headers: HeaderMap, Query(mq): Query<MatchQuery>) -> Response {
+    guard!(hub, headers, TokenQuery { token: mq.token.clone() });
+    use crate::genui::profile::{classify, keywords, similarity};
+    let text = mq.q.unwrap_or_default();
+    let (intent, confidence) = classify(&text);
+    let kw = keywords(&text);
+    let cfg = hub.cfg();
+    let surfaces = crate::genui::surfaces(&cfg);
+    let mut hits: Vec<(f32, Value)> = surfaces
+        .list()
+        .into_iter()
+        .filter_map(|sum| {
+            let s = surfaces.get(&sum.id).ok()?;
+            let sim = similarity(&kw, &keywords(&format!("{} {}", s.title, s.request)));
+            (sim >= 0.5).then(|| (sim + if s.intent == intent { 0.2 } else { 0.0 }, json!(sum)))
+        })
+        .collect();
+    hits.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let template = crate::genui::memory(&cfg)
+        .best_template(&intent, &text)
+        .map(|(t, fit)| json!({"id": t.id, "title": t.title, "fit": fit}));
+    Json(json!({"intent": intent, "confidence": confidence, "surfaces": hits.into_iter().take(3).map(|h| h.1).collect::<Vec<_>>(), "template": template}))
+        .into_response()
+}
+
+async fn genui_note_add(
+    State(hub): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    Json(body): Json<Value>,
+) -> Response {
+    guard!(hub, headers, q);
+    match body["text"].as_str().filter(|t| !t.trim().is_empty()) {
+        Some(t) => match crate::genui::memory(&hub.cfg()).remember(t) {
+            Ok(n) => Json(json!(n)).into_response(),
+            Err(e) => err(e),
+        },
+        None => err("empty note"),
+    }
+}
+
+async fn genui_note_delete(
+    State(hub): State<Shared>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    guard!(hub, headers, q);
+    match crate::genui::memory(&hub.cfg()).forget(&id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err(e),
+    }
+}
+
+async fn genui_template_delete(
+    State(hub): State<Shared>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    guard!(hub, headers, q);
+    match crate::genui::memory(&hub.cfg()).delete_template(&id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err(e),
+    }
+}
+
+async fn genui_reset(
+    State(hub): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    Json(body): Json<Value>,
+) -> Response {
+    guard!(hub, headers, q);
+    match crate::genui::memory(&hub.cfg()).reset(body["notes"] == true) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err(e),
+    }
+}
+
 // ── Files on nodes ───────────────────────────────────────────────────────────
 
 impl Hub {
@@ -851,6 +1149,8 @@ const ASSETS: &[(&str, &str, &str)] = &[
     ("/", "text/html; charset=utf-8", include_str!("ui/index.html")),
     ("/ui/app.css", "text/css; charset=utf-8", include_str!("ui/app.css")),
     ("/ui/app.js", "text/javascript; charset=utf-8", include_str!("ui/app.js")),
+    ("/ui/gen.css", "text/css; charset=utf-8", include_str!("ui/gen.css")),
+    ("/ui/gen.js", "text/javascript; charset=utf-8", include_str!("ui/gen.js")),
     ("/ui/vendor/marked-18.1.2.js", "text/javascript; charset=utf-8", include_str!("ui/vendor/marked-18.1.2.js")),
     ("/ui/vendor/purify-3.4.17.js", "text/javascript; charset=utf-8", include_str!("ui/vendor/purify-3.4.17.js")),
     (

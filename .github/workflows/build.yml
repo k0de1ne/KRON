@@ -42,6 +42,15 @@ jobs:
         if: matrix.test
         run: cargo test --target ${{ matrix.target }}
 
+      # The generative UI renderer in a real browser (no model needed).
+      - name: UI test
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          cargo build --target ${{ matrix.target }}
+          npm install --no-save --prefix /tmp/pw playwright@1.63.0
+          /tmp/pw/node_modules/.bin/playwright install --with-deps chromium
+          NODE_PATH=/tmp/pw/node_modules KRON_BIN=target/${{ matrix.target }}/debug/kron node tests/ui/surface.test.cjs
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 

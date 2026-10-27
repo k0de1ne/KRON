@@ -14,7 +14,7 @@ use std::sync::Arc;
 pub struct TurnReq {
     pub thread: String,
     pub text: String,
-    /// agent (default) | chat | web
+    /// agent (default) | chat | web | ui (the agent builds an interface)
     pub mode: String,
     pub agent: Option<String>,
     pub provider: Option<String>,
@@ -60,7 +60,10 @@ pub async fn turn(
             web[&site] = json!(url);
             store.set_meta(&req.thread, "web", web)?;
         }
-        "chat" => {
+        "ui" if crate::genui::capable(cfg, req) => {
+            crate::genui::turn(cfg, store, req, exec, sink, history).await?;
+        }
+        "chat" | "ui" => {
             let agent = new_agent(cfg, req, exec)?;
             let answer = agent.chat(history, sink).await?;
             store.append(&req.thread, &Message::assistant(answer))?;

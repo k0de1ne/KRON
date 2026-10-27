@@ -33,6 +33,18 @@ impl Access {
     }
 }
 
+/// Tools a caller adds to the agent for one run (the interface tools of the
+/// "ui" mode). They act on kron itself, never on the machine, so they need no
+/// approval and stay available in read-only mode.
+#[async_trait::async_trait]
+pub trait Extra: Send + Sync {
+    fn tools(&self) -> Vec<Tool>;
+    /// Appended to the system prompt.
+    fn system(&self) -> String;
+    /// None: not one of these tools.
+    async fn call(&self, name: &str, args: &Value, sink: &dyn Sink) -> Option<String>;
+}
+
 /// Where tools run: this process, or a node connected to the hub.
 #[async_trait::async_trait]
 pub trait Executor: Send + Sync {
@@ -130,6 +142,7 @@ pub struct Agent {
     allow_all: Arc<AtomicBool>,
     /// Parallel tool calls ask one at a time, so one answer can cover the rest.
     asking: Arc<tokio::sync::Mutex<()>>,
+    pub extra: Option<Arc<dyn Extra>>,
 }
 
 /// A sub-agent's steps, shown under the spawn_agent call that started it.
@@ -197,6 +210,7 @@ impl Agent {
             access: Access::Full,
             allow_all: Default::default(),
             asking: Default::default(),
+            extra: None,
         })
     }
 
@@ -220,6 +234,9 @@ impl Agent {
         }
         if self.access == Access::ReadOnly {
             all.retain(|t| READ_ONLY.contains(&t.name.as_str()));
+        }
+        if let Some(x) = &self.extra {
+            all.extend(x.tools());
         }
         all
     }
@@ -248,6 +265,9 @@ impl Agent {
                 retry it; adjust the plan or ask.</permissions>",
             ),
             Access::Full => {}
+        }
+        if let Some(x) = &self.extra {
+            s.push_str(&format!("\n\n{}", x.system()));
         }
         if !self.system.is_empty() {
             s.push_str(&format!("\n\n{}", self.system));
@@ -299,6 +319,17 @@ impl Agent {
     async fn call(&self, tc: &ToolCall, sink: &dyn Sink) -> String {
         let args = tc.arguments.to_string();
         sink.emit(Event::ToolStart { id: tc.id.clone(), name: tc.name.clone(), args, parent: None });
+        if let Some(x) = &self.extra
+            && let Some(output) = x.call(&tc.name, &tc.arguments, sink).await
+        {
+            sink.emit(Event::ToolEnd {
+                id: tc.id.clone(),
+                name: tc.name.clone(),
+                output: output.clone(),
+                parent: None,
+            });
+            return output;
+        }
         let output = match self.permit(tc, sink).await {
             Err(refusal) => refusal,
             Ok(()) if AGENT_SIDE.contains(&tc.name.as_str()) => {

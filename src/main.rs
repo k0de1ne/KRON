@@ -3,6 +3,7 @@ mod auth;
 mod browser;
 mod config;
 mod files;
+mod genui;
 mod hub;
 mod llm;
 mod local;

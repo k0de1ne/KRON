@@ -1,6 +1,6 @@
 # Интерфейс kron
 
-Веб-интерфейс — это `src/ui/`: `index.html` (разметка и иконки), `app.css` (дизайн-система), `app.js` (логика), `vendor/` (marked, DOMPurify, highlight.js). Хаб встраивает всё это в бинарник, поэтому интерфейс работает без интернета: на телефоне с локальной моделью, в самолёте, за Tailscale. Сборки нет: правите файл, `cargo build`, обновляете страницу.
+Веб-интерфейс — это `src/ui/`: `index.html` (разметка и иконки), `app.css` (дизайн-система), `app.js` (логика), `gen.js` и `gen.css` (интерфейсы под задачу, см. [genui.md](genui.md)), `vendor/` (marked, DOMPurify, highlight.js). Хаб встраивает всё это в бинарник, поэтому интерфейс работает без интернета: на телефоне с локальной моделью, в самолёте, за Tailscale. Сборки нет: правите файл, `cargo build`, обновляете страницу.
 
 ## На чём основаны решения
 
@@ -58,9 +58,10 @@
 
 - `GET /api/threads?q=` — чаты с полями `running`, `waiting`, `forked_from`, `snippet` (при поиске).
 - `GET /api/threads/:name/meta`, `POST /api/threads/:name/title`, `POST /api/threads/:name/fork {upto}`.
+- `POST /api/runs` принимает `mode` = `ui` (интерфейс под задачу), `agent`, `chat`, `web`; API интерфейсов — в [genui.md](genui.md).
 - `POST /api/runs` принимает ещё `access` (`full` / `ask` / `read`), `effort`, `cwd`, `interactive`.
 - `POST /api/runs/:id/answer {ask, answer}` — ответ на подтверждение (`allow`, `allow_all`, `deny`, `deny: причина`) или вопрос.
 - `POST /api/files {node, cwd, op, path, data}` — `list`, `read`, `write`, `mkdir`, `stat` на любой машине.
 - `GET /raw/:token/:node/*path` — файл как веб-страница (HTML открывается с CSS и скриптами, в песочнице без доступа к хабу).
 
-События рана (`/api/runs/:id/events`): `text`, `reasoning`, `tool_start` / `tool_end` (с `id` и `parent` для шагов субагента), `ask`, `answered`, `error`, `done`.
+События рана (`/api/runs/:id/events`): `text`, `reasoning`, `tool_start` / `tool_end` (с `id` и `parent` для шагов субагента), `ask`, `answered`, `surface` (интерфейс задачи), `error`, `done`.
