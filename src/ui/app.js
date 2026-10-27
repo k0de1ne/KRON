@@ -130,7 +130,7 @@ let traps = 0;
 function trapFocus(box) {
   const back = document.activeElement, app = $('app');
   app.inert = true; traps++;
-  const sel = 'button:not([disabled]),a[href],input:not([disabled]),select,textarea,[tabindex]:not([tabindex="-1"])';
+  const sel = ':is(button,a[href],input,select,textarea,[tabindex]):not([disabled],[tabindex="-1"])';
   const onKey = e => {
     if (e.key !== 'Tab') return;
     const f = [...box.querySelectorAll(sel)].filter(x => x.getClientRects().length);
@@ -573,9 +573,13 @@ async function resend(n, text) {
     const recs = await getJSON('/api/threads/' + S.thread);
     let k = -1, upto = recs.length;
     for (let i = 0; i < recs.length; i++) if (recs[i].role === 'user' && ++k === n) { upto = i; break; }
-    const r = await postJSON(`/api/threads/${S.thread}/fork`, {upto});
+    const dead = !recs.slice(upto).some(x => x.role === 'assistant');
+    const old = S.thread;
+    const r = await postJSON(`/api/threads/${old}/fork`, {upto});
+    if (dead && upto === recs.findLastIndex(x => x.role === 'user')) await api('/api/threads/' + old, {method: 'DELETE'}).catch(() => {});
     await openThread(r.thread);
-    toast('Новая ветка чата', {ic: 'git-branch'});
+    if (!dead) toast('Новая ветка чата', {ic: 'git-branch'});
+    loadThreads().catch(() => {});
     send(text);
   } catch (e) { fail(e); }
 }
@@ -907,7 +911,7 @@ function validPick(p) {
 /** The picked provider is a subscription that is not signed in yet. */
 function needsLogin(p) {
   const pr = p?.kind === 'provider' ? provider(p.name) : p?.kind === 'agent' ? provider(S.info.agents.find(a => a.name === p.name)?.provider || S.info.default) : null;
-  return !!pr && pr.oauth && !pr.logged_in;
+  return !!pr && ((pr.oauth && !pr.logged_in) || !!pr.key_missing);
 }
 function pickModel(p) {
   if (p?.kind !== 'provider') return '';
@@ -974,7 +978,7 @@ const EFFORT = {'': 'авто', minimal: 'минимальное', low: 'низ�
 function refreshControls() {
   if (!S.info) return;
   if (!validPick(S.pick)) {
-    const ps = S.info.providers, usable = x => !x.oauth || x.logged_in;
+    const ps = S.info.providers, usable = x => x.oauth ? x.logged_in : !x.key_missing;
     const d = ps.find(x => x.name === S.info.default);
     const first = d && usable(d) ? d : ps.find(usable) || d;
     S.pick = first ? {kind: 'provider', name: first.name} : null;
@@ -1026,10 +1030,11 @@ function refreshControls() {
   if (web) bits.push(icon('globe', 'sm') + 'Вопрос уйдёт в обычный веб-чат ' + esc(SITE_NAME[p.name] || p.name));
   else if (agentMode) bits.push(icon('wrench', 'sm') + 'Агент на машине <b>' + esc(S.node || '—') + '</b>' + (S.cwd() ? ' в ' + esc(shortPath(S.cwd())) : ''));
   else bits.push(icon('message-square', 'sm') + 'Обычный чат, без инструментов');
-  ctx.innerHTML = bits.join(' ');
+  ctx.innerHTML = `<span class="ctx-line">${bits.join(' ')}</span>`;
   if (!web && needsLogin(p)) {
-    const w = el('div', 'login-cta', icon('log-in', 'sm') + '<span>Эта подписка ещё не подключена. Войдите или выберите модель по ключу API.</span>');
-    w.append(btn('btn sm primary', 'Войти', () => openSettings('accounts')), btn('btn sm', 'Выбрать модель', () => $('modelBtn').click()));
+    const noKey = provider(p.kind === 'agent' ? S.info.agents.find(a => a.name === p.name)?.provider || S.info.default : p.name)?.key_missing;
+    const w = el('div', 'login-cta', `<div class="msg-line">${icon(noKey ? 'key-round' : 'log-in', 'sm')}<span>${noKey ? 'Для этой модели не задан ключ API.' : 'Эта подписка ещё не подключена. Войдите или выберите модель по ключу API.'}</span></div>`);
+    w.append(btn('btn sm primary', noKey ? 'Ввести ключ' : 'Войти', () => openSettings(noKey ? 'api' : 'accounts')), btn('btn sm', 'Выбрать модель', () => $('modelBtn').click()));
     ctx.append(w);
   }
   renderSuggestions(web ? 'chat' : agentMode ? 'agent' : 'chat');
@@ -1200,7 +1205,7 @@ async function send(textOverride) {
   if ((!t && !S.attachments.length) || !S.pick) return;
   if (S.busy) return;
   const p = S.pick, web = p.kind === 'site';
-  if (needsLogin(p)) { toast('Сначала войдите в подписку или выберите модель по ключу API', {action: 'Войти', onAction: () => openSettings('accounts')}); return; }
+  if (needsLogin(p)) { { const nk = provider(p.name)?.key_missing; toast(nk ? 'Сначала введите ключ API' : 'Сначала войдите в подписку или выберите другую модель', {action: nk ? 'Ввести ключ' : 'Войти', onAction: () => openSettings(nk ? 'api' : 'accounts')}); } return; }
   const mode = web ? 'web' : (p.kind === 'agent' || S.mode === 'agent') ? 'agent' : 'chat';
   if (textOverride == null) { text.value = ''; delete drafts[S.thread || '_new']; storeJSON('drafts', drafts); }
   setBusy(true);
@@ -1526,9 +1531,14 @@ async function signIn(p, row) {
   if (/kron-android/.test(navigator.userAgent)) location.href = r.url; else window.open(r.url, '_blank', 'noopener');
   row.nextElementSibling?.classList.contains('paste') && row.nextElementSibling.remove();
   const box = el('div', 'paste'), inp = el('input', 'input');
-  inp.placeholder = r.paste ? 'Вставьте код со страницы входа' : 'Если не сработало само — вставьте адрес из браузера';
-  const ok = btn('btn primary', 'Готово');
-  box.append(inp, ok); row.after(box);
+  inp.placeholder = r.paste ? 'Код со страницы входа' : 'Адрес страницы или код';
+  inp.setAttribute('aria-label', inp.placeholder);
+  const ok = btn('btn primary', 'Подтвердить вход');
+  const help = el('p', 'paste-help', r.paste
+    ? '1. Войдите на открывшейся странице. 2. Скопируйте показанный код и вставьте сюда.'
+    : '1. Войдите на открывшейся странице. Обычно вход завершится сам. 2. Если страница не открылась или показала ошибку, скопируйте её адрес из строки браузера и вставьте сюда.');
+  const again = btn('btn sm', icon('external-link', 'sm') + 'Открыть страницу ещё раз', () => window.open(r.url, '_blank', 'noopener'));
+  box.append(help, inp, ok, again); row.after(box);
   const done = async () => { clearInterval(timer); await loadInfo(); toast('Вход выполнен: ' + p.name, {ic: 'check'}); if (settingsEl) openSettings('accounts'); };
   ok.onclick = async () => {
     try { await postJSON('/api/login/' + p.name + '/code', {code: inp.value}); done(); } catch (e) { fail(e); }
@@ -1550,12 +1560,30 @@ const PRESETS = {
   cliproxy: ['CLIProxyAPI', 'anthropic', 'http://127.0.0.1:8317', ''],
   custom: ['Свой сервер', 'openai', '', ''],
 };
+/** Put api_key into [providers.<name>] of config.toml (dropping api_key_env), keeping everything else. */
+async function setKey(name) {
+  const key = await dialog({title: 'Ключ API · ' + name, text: 'Ключ хранится в config.toml на хабе.', input: true, placeholder: 'sk-…', ok: 'Сохранить'});
+  if (!key || !key.trim()) return;
+  try {
+    const c = await getJSON('/api/config');
+    const lines = c.text.split('\n'), q = '"' + key.trim().replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+    const start = lines.findIndex(l => l.trim() === `[providers.${name}]`);
+    if (start < 0) throw new Error('Провайдер не найден в config.toml: правьте файл вручную');
+    let end = lines.findIndex((l, i) => i > start && /^\s*\[/.test(l)); if (end < 0) end = lines.length;
+    const rest = lines.slice(start + 1, end).filter(l => !/^\s*#?\s*api_key(_env)?\s*=/.test(l));
+    lines.splice(start + 1, end - start - 1, `api_key = ${q}`, ...rest);
+    await api('/api/config', {method: 'PUT', json: {text: lines.join('\n')}});
+    await loadInfo(); refreshControls(); openSettings('api');
+    toast('Ключ сохранён', {ic: 'check'});
+  } catch (e) { fail(e); }
+}
 function tabApi(body) {
   body.append(el('p', 'lead', 'Любой сервис с OpenAI-, Responses- или Anthropic-совместимым API: DeepSeek, OpenRouter, локальные модели. Провайдер добавится в config.toml.'));
   const apis = S.info.providers.filter(p => !p.oauth && p.kind !== 'local');
   if (apis.length) {
     body.append(el('h4', '', 'Подключены'));
-    for (const p of apis) body.append(card('key-round', esc(p.name), `${KIND[p.kind] || p.kind} · ${p.model}`));
+    for (const p of apis) body.append(card('key-round', esc(p.name) + (p.key_missing ? ' <span class="badge warn">нет ключа</span>' : ''), `${KIND[p.kind] || p.kind} · ${p.model}`,
+      btn('btn sm' + (p.key_missing ? ' primary' : ''), p.key_missing ? 'Ввести ключ' : 'Сменить ключ', () => setKey(p.name))));
   }
   body.append(el('h4', '', 'Добавить'));
   const form = el('div', 'card col');

@@ -472,7 +472,7 @@ body:not(.has-log) #scroll { display: none; }
 .chips::-webkit-scrollbar { display: none; }
 .chips { mask-image: linear-gradient(to right, #000 calc(100% - 20px), transparent); }
 #modelBtn.warn .sub { color: var(--warn); font-weight: 600; }
-.login-cta { flex-basis: 100%;  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; margin-top: 8px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--warn-soft); color: var(--fg-2); max-width: 460px; }
+.login-cta { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; margin-top: 8px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--warn-soft); color: var(--fg-2); max-width: 460px; }
 .err-box details { margin-top: 4px; font-size: 12px; color: var(--muted); }
 .err-box details code { display: block; white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 4px; }
 #send { width: 36px; height: 36px; border-radius: var(--r-md); background: var(--accent); color: var(--accent-fg); display: grid; place-items: center; flex: none; transition: transform var(--fast), opacity var(--fast), background var(--fast); }
@@ -535,7 +535,9 @@ body:not(.has-log) #scroll { display: none; }
 .card .bar { height: 4px; border-radius: 2px; background: var(--line); margin-top: 8px; overflow: hidden; }
 .card .bar i { display: block; height: 100%; background: var(--accent); transition: width var(--med); }
 .card.col { flex-direction: column; align-items: stretch; }
-.paste { display: flex; gap: 6px; margin: -2px 0 10px; }
+.paste { display: flex; flex-wrap: wrap; gap: 8px; margin: -2px 0 10px; }
+.paste .input { flex: 1 1 200px; min-width: 0; }
+.paste-help { flex-basis: 100%; margin: 0; color: var(--muted); font-size: 13px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .setting { display: flex; align-items: center; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--line); }
 .setting .n { flex: 1; min-width: 0; }
@@ -626,3 +628,8 @@ pre.snippet { font: 12.5px/1.55 var(--mono); background: var(--code); border: 1p
 :root[data-theme="dark"] .hljs-meta, :root[data-theme="dark"] .hljs-tag, :root[data-theme="dark"] .hljs-punctuation, :root[data-theme="dark"] .hljs-comment { color: #9c9a92; }
 
 @media (max-width: 480px) { .setting { flex-direction: column; align-items: stretch; gap: 10px; } .setting .seg { display: flex; } .setting .seg button { flex: 1; justify-content: center; } }
+@media (pointer: coarse) { .menu .search input, .menu .model-row input { height: var(--tap); } }
+#empty .ctx:has(.login-cta) { flex-direction: column; }
+#empty .ctx-line { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: center; }
+.login-cta .msg-line { flex-basis: 100%; display: flex; gap: 8px; align-items: flex-start; text-align: left; }
+.login-cta .msg-line .ic { margin-top: 2px; flex: none; }

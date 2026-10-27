@@ -244,7 +244,9 @@ async fn info(State(hub): State<Shared>, headers: HeaderMap, Query(q): Query<Tok
         .map(|(n, p)| {
             let oauth = matches!(p.kind.as_str(), "codex" | "claude" | "gemini" | "antigravity");
             let logged_in = oauth && crate::auth::Auth::new(&cfg, n, &p.kind, p).is_ok_and(|a| a.logged_in());
-            json!({"name": n, "kind": p.kind, "model": p.model, "oauth": oauth, "logged_in": logged_in})
+            // An API provider that is configured to read its key from the environment but cannot find it.
+            let key_missing = !oauth && p.kind != "local" && p.api_key_env.is_some() && crate::llm::api_key(p).is_none();
+            json!({"name": n, "kind": p.kind, "model": p.model, "oauth": oauth, "logged_in": logged_in, "key_missing": key_missing})
         })
         .collect();
     let agents: Vec<Value> = cfg
