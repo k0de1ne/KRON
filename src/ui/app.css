@@ -164,7 +164,7 @@ a { color: var(--accent-text); }
   .chip .short { display: inline; }
   .crow { gap: 2px; padding: 4px 6px 6px; }
 }
-@media (pointer: coarse) { .chip { height: 36px; } }
+@media (pointer: coarse) { .chip { height: var(--tap); } .btn.sm, .crumbs button, .side-search input { min-height: var(--tap); } .icon-btn.sm { min-width: var(--tap); min-height: var(--tap); } }
 
 .badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; font-weight: 600; padding: 1px 7px; border-radius: var(--r-full); background: var(--surface-2); color: var(--muted); border: 1px solid var(--line); line-height: 1.5; white-space: nowrap; }
 .badge.ok { color: var(--ok); background: var(--ok-soft); border-color: transparent; }
@@ -267,7 +267,7 @@ body.side-closed #side { margin-left: calc(-1 * var(--side-w)); }
 .side-head { display: flex; align-items: center; gap: 4px; padding: 10px 10px 6px 16px; height: var(--top-h); }
 .brand { font: 600 19px/1 var(--font); letter-spacing: -.01em; flex: 1; display: flex; align-items: center; gap: 8px; }
 .brand i { color: var(--accent); font-style: normal; }
-.brand svg { width: 22px; height: 22px; }
+.brand svg { width: 22px; height: 22px; color: var(--accent); }
 .side-actions { padding: 2px 8px 8px; display: flex; flex-direction: column; gap: 2px; }
 .side-btn { display: flex; align-items: center; gap: 10px; width: 100%; min-height: var(--tap); padding: 0 10px; border-radius: var(--r-sm); font-size: 14px; text-align: left; color: var(--fg-2); }
 .side-btn:hover { background: var(--hover); color: var(--fg); }
@@ -290,7 +290,7 @@ body.side-closed #side { margin-left: calc(-1 * var(--side-w)); }
 .th .snip { display: block; font-size: 12px; color: var(--muted); font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .th .more { opacity: 0; }
 .th:hover .more, .th.on .more, .th .more[aria-expanded="true"] { opacity: 1; }
-@media (pointer: coarse) { .th .more { opacity: 1; } }
+@media (pointer: coarse) { .th .more { opacity: 1; min-width: var(--tap); min-height: var(--tap); } }
 .th .ic.xs { color: var(--muted); }
 .th.leaving { opacity: 0; transform: translateX(-8px); transition: all var(--med); }
 .side-empty { padding: 24px 12px; text-align: center; color: var(--muted); font-size: 13px; }
@@ -470,12 +470,17 @@ body:not(.has-log) #scroll { display: none; }
 .crow { display: flex; align-items: center; gap: 6px; padding: 6px 8px 8px; }
 .chips { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; padding: 2px; }
 .chips::-webkit-scrollbar { display: none; }
+.chips { mask-image: linear-gradient(to right, #000 calc(100% - 20px), transparent); }
+#modelBtn.warn .sub { color: var(--warn); font-weight: 600; }
+.login-cta { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; margin-top: 8px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--warn-soft); color: var(--fg-2); max-width: 460px; }
+.err-box details { margin-top: 4px; font-size: 12px; color: var(--muted); }
+.err-box details code { display: block; white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 4px; }
 #send { width: 36px; height: 36px; border-radius: var(--r-md); background: var(--accent); color: var(--accent-fg); display: grid; place-items: center; flex: none; transition: transform var(--fast), opacity var(--fast), background var(--fast); }
 #send:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 88%, black); }
 #send:active:not(:disabled) { transform: scale(.94); }
 #send:disabled { opacity: .35; }
 #send.stop { background: var(--fg); color: var(--bg); }
-@media (pointer: coarse) { #send { width: 42px; height: 42px; } }
+@media (pointer: coarse) { #send { width: var(--tap); height: var(--tap); } }
 .hint { text-align: center; color: var(--muted); font-size: 11.5px; padding-top: 8px; }
 .hint .kbd { font-size: 10px; padding: 2px 4px; }
 
@@ -571,7 +576,7 @@ pre.snippet { font: 12.5px/1.55 var(--mono); background: var(--code); border: 1p
   body.drawer #side { transform: none; box-shadow: var(--shadow-3); }
   body.drawer #sideScrim { display: block; }
   #sideOpen { display: inline-grid !important; }
-  #sideClose { display: none; }
+  #sideClose { display: grid; }
   #log { padding: 4px 16px 24px; }
   #composerWrap { padding: 0 8px calc(8px + env(safe-area-inset-bottom)); }
   .hint { display: none; }

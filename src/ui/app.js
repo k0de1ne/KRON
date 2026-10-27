@@ -66,7 +66,7 @@ const S = {
   mode: store('mode') || 'agent',          // agent | chat
   node: store('node'),
   cwds: storeJSON('cwds') || {},           // node -> working folder
-  access: store('access') || 'full',       // full | ask | read
+  access: store('access') || 'ask',       // full | ask | read
   effort: store('effort') || '',
   models: storeJSON('models') || {},       // provider -> model override
   attachments: [],
@@ -123,6 +123,25 @@ function toast(text, {action, onAction, err, timeout = 4500, ic} = {}) {
 }
 const fail = e => toast(String(e?.message || e), {err: true, timeout: 7000});
 
+let traps = 0;
+/** Keep Tab inside a modal, hide the page behind it from assistive tech, and give focus back on release. */
+function trapFocus(box) {
+  const back = document.activeElement, app = $('app');
+  app.inert = true; traps++;
+  const sel = 'button:not([disabled]),[href],input:not([disabled]),select,textarea,[tabindex]:not([tabindex="-1"])';
+  const onKey = e => {
+    if (e.key !== 'Tab') return;
+    const f = [...box.querySelectorAll(sel)].filter(x => x.offsetParent !== null);
+    if (!f.length) return;
+    const first = f[0], last = f[f.length - 1];
+    if (!box.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+    else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  };
+  document.addEventListener('keydown', onKey, true);
+  return () => { document.removeEventListener('keydown', onKey, true); if (!--traps) app.inert = false; back?.isConnected && back.focus?.(); };
+}
+
 /** A modal: resolves to true / the input text, or null when dismissed. */
 function dialog({title, text, input, value = '', placeholder = '', ok = 'Готово', danger = false, cancel = 'Отмена'}) {
   return new Promise(resolve => {
@@ -132,7 +151,8 @@ function dialog({title, text, input, value = '', placeholder = '', ok = 'Гот�
     let inp = null;
     if (input) { inp = el('input', 'input'); inp.value = value; inp.placeholder = placeholder; d.append(inp); }
     const row = el('div', 'row-end');
-    const finish = v => { scrim.remove(); document.removeEventListener('keydown', key, true); resolve(v); };
+    const release = trapFocus(d);
+    const finish = v => { scrim.remove(); document.removeEventListener('keydown', key, true); release(); resolve(v); };
     if (cancel) row.append(btn('btn', esc(cancel), () => finish(null)));
     row.append(btn('btn ' + (danger ? 'danger solid' : 'primary'), esc(ok), () => finish(inp ? inp.value : true)));
     d.append(row); scrim.append(d); document.body.append(scrim);
@@ -285,13 +305,25 @@ document.addEventListener('click', e => {
   if (b.dataset.act === 'wrap') box.classList.toggle('wrap');
 });
 
+/** [text for a person, needs sign-in] for the errors people actually hit. */
+function humanError(m) {
+  if (/no .*credentials|логин|run `kron login`|sign in|401|unauthor|expired|войти/i.test(m)) return ['Нужно войти в подписку. После входа нажмите «Повторить».', true];
+  if (/403|forbidden/i.test(m)) return ['Доступ запрещён: проверьте подписку или ключ API.', true];
+  if (/429|rate.?limit|quota/i.test(m)) return ['Лимит запросов исчерпан. Подождите или выберите другую модель.', false];
+  if (/failed to fetch|networkerror|network|timed? ?out|connection (refused|reset)|dns/i.test(m)) return ['Нет связи. Проверьте сеть и повторите.', false];
+  return [m, false];
+}
+
 // ── Sidebar: threads ─────────────────────────────────────────────────────────
+function syncDrawer() { $('side').inert = isMobile() && !document.body.classList.contains('drawer'); }
+addEventListener('resize', () => syncDrawer());
 const sideOpen = () => isMobile() ? document.body.classList.contains('drawer') : !document.body.classList.contains('side-closed');
 function toggleSide(open = !sideOpen()) {
-  if (isMobile()) document.body.classList.toggle('drawer', open);
+  if (isMobile()) { document.body.classList.toggle('drawer', open); syncDrawer(); if (open) setTimeout(() => $('newChat').focus(), 50); else if (!matchMedia('(hover: none)').matches) $('sideOpen').focus(); }
   else { document.body.classList.toggle('side-closed', !open); store('side', open ? null : 'closed'); }
 }
 if (document.documentElement.classList.contains('side-closed-init')) document.body.classList.add('side-closed');
+syncDrawer();
 $('sideClose').onclick = () => toggleSide(false);
 $('sideOpen').onclick = () => toggleSide(true);
 $('sideScrim').onclick = () => toggleSide(false);
@@ -744,9 +776,10 @@ class Turn {
   error(msg) {
     this.closeText(); this.closeThink();
     if (msg === 'stopped') { this.root.append(el('div', 'note', icon('square', 'xs') + 'Остановлено')); return; }
-    const box = el('div', 'err-box', icon('circle-alert', 'sm') + `<span class="t">${esc(msg)}</span>`);
-    if (/логин|login|sign in|401|403|unauthor|expired|войти/i.test(msg)) box.append(btn('btn sm', 'Войти', () => openSettings('accounts')));
-    else if (!this.live || this.retry) box.append(btn('btn sm', icon('refresh-cw', 'xs') + 'Повторить', () => this.retry ? this.retry() : retryTurn(+this.root.dataset.n)));
+    const [human, needLogin] = humanError(msg);
+    const box = el('div', 'err-box', icon('circle-alert', 'sm') + `<span class="t">${esc(human)}${human !== msg ? `<details><summary>Подробности</summary><code>${esc(msg)}</code></details>` : ''}</span>`);
+    if (needLogin) box.append(btn('btn sm primary', 'Войти', () => openSettings('accounts')));
+    if (!this.live || this.retry) box.append(btn('btn sm', icon('refresh-cw', 'xs') + 'Повторить', () => this.retry ? this.retry() : retryTurn(+this.root.dataset.n)));
     this.root.append(box);
   }
   finish() {
@@ -863,6 +896,11 @@ function validPick(p) {
   if (p.kind === 'agent') return S.info.agents.some(a => a.name === p.name);
   return S.info.providers.some(x => x.name === p.name);
 }
+/** The picked provider is a subscription that is not signed in yet. */
+function needsLogin(p) {
+  const pr = p?.kind === 'provider' ? provider(p.name) : p?.kind === 'agent' ? provider(S.info.agents.find(a => a.name === p.name)?.provider || S.info.default) : null;
+  return !!pr && pr.oauth && !pr.logged_in;
+}
 function pickModel(p) {
   if (p?.kind !== 'provider') return '';
   return S.models[p.name] || provider(p.name)?.model || '';
@@ -927,7 +965,12 @@ const label2 = (long, short) => short && short !== long ? `<span class="long">${
 const EFFORT = {'': 'авто', minimal: 'минимальное', low: 'низкое', medium: 'среднее', high: 'высокое'};
 function refreshControls() {
   if (!S.info) return;
-  if (!validPick(S.pick)) S.pick = S.info.default ? {kind: 'provider', name: S.info.default} : null;
+  if (!validPick(S.pick)) {
+    const ps = S.info.providers, usable = x => !x.oauth || x.logged_in;
+    const d = ps.find(x => x.name === S.info.default);
+    const first = d && usable(d) ? d : ps.find(usable) || d;
+    S.pick = first ? {kind: 'provider', name: first.name} : null;
+  }
   const p = S.pick, web = p?.kind === 'site', agentPreset = p?.kind === 'agent';
   const agentMode = !web && (agentPreset || S.mode === 'agent');
   const nodes = nodesFor();
@@ -938,7 +981,8 @@ function refreshControls() {
   if (!p) { mb.querySelector('.name').textContent = 'Нет моделей'; mb.querySelector('.sub').textContent = ''; }
   else if (p.kind === 'site') { mb.querySelector('.name').textContent = SITE_NAME[p.name] || p.name; mb.querySelector('.sub').textContent = 'веб-чат'; }
   else if (p.kind === 'agent') { mb.querySelector('.name').textContent = p.name; mb.querySelector('.sub').textContent = 'агент'; }
-  else { mb.querySelector('.name').textContent = p.name; mb.querySelector('.sub').textContent = pickModel(p); }
+  else { mb.querySelector('.name').textContent = p.name; mb.querySelector('.sub').textContent = needsLogin(p) ? 'нужен вход' : pickModel(p); }
+  mb.classList.toggle('warn', needsLogin(p));
 
   // Composer chips.
   const chips = $('chips'); chips.innerHTML = '';
@@ -975,6 +1019,11 @@ function refreshControls() {
   else if (agentMode) bits.push(icon('wrench', 'sm') + 'Агент на машине <b>' + esc(S.node || '—') + '</b>' + (S.cwd() ? ' в ' + esc(shortPath(S.cwd())) : ''));
   else bits.push(icon('message-square', 'sm') + 'Обычный чат, без инструментов');
   ctx.innerHTML = bits.join(' ');
+  if (!web && needsLogin(p)) {
+    const w = el('div', 'login-cta', icon('log-in', 'sm') + '<span>Эта подписка ещё не подключена. Войдите или выберите модель по ключу API.</span>');
+    w.append(btn('btn sm primary', 'Войти', () => openSettings('accounts')), btn('btn sm', 'Выбрать модель', () => $('modelBtn').click()));
+    ctx.append(w);
+  }
   renderSuggestions(web ? 'chat' : agentMode ? 'agent' : 'chat');
   $('filesBtn').hidden = !S.node;
   grow();
@@ -1023,7 +1072,7 @@ function renderSuggestions(kind) {
   for (const [ic, title, prompt] of SUGG[kind]) {
     box.append(btn('', icon(ic) + `<span>${esc(title)}</span>`, () => {
       const t = $('text'); t.value = prompt; grow(); t.focus();
-      if (kind === 'agent') send(); else t.setSelectionRange(t.value.length, t.value.length);
+      t.setSelectionRange(t.value.length, t.value.length);
     }));
   }
 }
@@ -1142,6 +1191,7 @@ async function send(textOverride) {
   if ((!t && !S.attachments.length) || !S.pick) return;
   if (S.busy) return;
   const p = S.pick, web = p.kind === 'site';
+  if (needsLogin(p)) { toast('Сначала войдите в подписку или выберите модель по ключу API', {action: 'Войти', onAction: () => openSettings('accounts')}); return; }
   const mode = web ? 'web' : (p.kind === 'agent' || S.mode === 'agent') ? 'agent' : 'chat';
   if (textOverride == null) { text.value = ''; delete drafts[S.thread || '_new']; storeJSON('drafts', drafts); }
   setBusy(true);
@@ -1300,7 +1350,7 @@ function renderPanel() {
     tools.append(btn('btn sm primary', icon('check', 'sm') + 'Работать в этой папке', () => { setCwd(F.path); closeFiles(); toast('Рабочая папка: ' + shortPath(F.path), {ic: 'folder-open'}); }));
   } else {
     const isCwd = S.cwd() === F.path;
-    tools.append(btn('btn sm' + (isCwd ? '' : ''), icon(isCwd ? 'check' : 'folder-open', 'sm') + (isCwd ? 'Рабочая папка' : 'Сделать рабочей'), () => { setCwd(isCwd ? '' : F.path); renderPanel(); }, 'Здесь агент будет работать в этом чате'));
+    tools.append(btn('btn sm' + (isCwd ? '' : ''), icon(isCwd ? 'check' : 'folder-open', 'sm') + (isCwd ? 'Рабочая папка' : 'Сделать рабочей'), () => { setCwd(isCwd ? '' : F.path); renderPanel(); }, 'Агент будет работать в этой папке на машине ' + (S.node || '')));
   }
   tools.append(
     btn('btn sm', icon('upload', 'sm') + 'Загрузить', () => {
@@ -1430,10 +1480,15 @@ function openSettings(tab = settingsTab) {
   const body = el('div', 'body');
   pane.append(header, body); sheet.append(nav, pane);
   settingsEl.innerHTML = ''; settingsEl.append(sheet);
+  const firstOpen = !settingsEl.dataset.trap;
+  if (firstOpen) { settingsEl.dataset.trap = '1'; settingsEl.release = trapFocus(sheet); settingsEl.setAttribute('aria-hidden', 'false'); }
+  sheet.setAttribute('aria-label', 'Настройки');
   ({accounts: tabAccounts, api: tabApi, local: tabLocal, machines: tabMachines, look: tabLook, config: tabConfig, keys: tabKeys})[tab](body);
-  nav.querySelector('[aria-selected="true"]')?.scrollIntoView({inline: 'center', block: 'nearest'});
+  const cur = nav.querySelector('[aria-selected="true"]');
+  cur?.scrollIntoView({inline: 'center', block: 'nearest'});
+  if (firstOpen || document.activeElement === document.body) cur?.focus();
 }
-function closeSettings() { settingsEl?.remove(); settingsEl = null; clearTimeout(modelTimer); }
+function closeSettings() { settingsEl?.release?.(); settingsEl?.remove(); settingsEl = null; clearTimeout(modelTimer); }
 $('openSettings').onclick = () => openSettings('accounts');
 
 function card(ic, title, sub, ...right) {
@@ -1707,7 +1762,7 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'Escape') {
     if (paletteEl) closePalette();
     else if (settingsEl) closeSettings();
-    else if (!$('panel').hidden && isMobile()) closeFiles();
+    else if (!$('panel').hidden) closeFiles();
     else if (document.body.classList.contains('drawer')) toggleSide(false);
     else if (S.busy && !S.ask) stop();
   } else if (e.key === '/' && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName) && !document.activeElement?.isContentEditable) {
