@@ -96,7 +96,7 @@ pub async fn work(
             "ephemeral": ephemeral,
             "os": std::env::consts::OS,
             "cwd": cwd,
-            "browser": !cfg.browser.disabled && crate::browser::find_chrome(&cfg.browser).is_some(),
+            "browser": crate::browser::available(&cfg.browser),
             "environment": environment(&name, &cwd),
             "tools": local.external_tools(),
         });

@@ -42,6 +42,7 @@ public class KronService extends Service {
     public void onCreate() {
         super.onCreate();
         instance = this;
+        WebChat.get(this);
         NotificationManager nm = getSystemService(NotificationManager.class);
         nm.createNotificationChannel(new NotificationChannel("kron", "kron", NotificationManager.IMPORTANCE_LOW));
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class),
@@ -98,6 +99,8 @@ public class KronService extends Service {
                 env.put("HOSTNAME", Build.MODEL.toLowerCase().replaceAll("[^a-z0-9]+", "-"));
                 // proot and the agent's Ubuntu (see src/sandbox.rs).
                 env.put("KRON_NATIVE_DIR", getApplicationInfo().nativeLibraryDir);
+                // Web chats run in the app's WebView (see src/browser.rs).
+                env.put("KRON_WEBVIEW", WebChat.socket());
                 startedWithStorage = hasStorage(this);
                 proc = pb.start();
                 proc.waitFor();

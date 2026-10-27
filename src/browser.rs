@@ -1,6 +1,9 @@
 //! Web chats (ChatGPT, Gemini, ...) driven in a real Chrome/Chromium/Edge with
 //! a persistent profile, over the DevTools protocol. Uses the chat limits of
 //! the subscription, not the API/agent ones.
+//!
+//! In the Android app there is no Chrome: the app keeps a WebView for web chats
+//! and passes its DevTools socket in `KRON_WEBVIEW`; kron drives that page instead.
 
 use crate::config::{BrowserCfg, Config, SiteCfg};
 use anyhow::{Context, Result, bail};
@@ -9,13 +12,33 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::process::Child;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message as WsMsg};
+use tokio_tungstenite::{WebSocketStream, tungstenite::Message as WsMsg};
 
-pub struct Browser {
-    child: Child,
-    port: u16,
+trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
+
+pub enum Browser {
+    Chrome {
+        child: Child,
+        port: u16,
+    },
+    /// The Android app's WebView, reached through its DevTools abstract socket.
+    WebView {
+        socket: String,
+    },
+}
+
+/// DevTools socket of the Android app's web chat WebView, if kron runs inside the app.
+fn webview_socket() -> Option<String> {
+    std::env::var("KRON_WEBVIEW").ok().filter(|s| !s.is_empty())
+}
+
+/// Whether this machine can serve web chats.
+pub fn available(cfg: &BrowserCfg) -> bool {
+    !cfg.disabled && (find_chrome(cfg).is_some() || webview_socket().is_some())
 }
 
 pub fn find_chrome(cfg: &BrowserCfg) -> Option<PathBuf> {
@@ -51,6 +74,16 @@ fn running_as_root() -> bool {
 }
 
 impl Browser {
+    /// Chrome if there is one, else the Android app's WebView.
+    pub async fn start(cfg: &BrowserCfg, profile: &Path, headless: bool) -> Result<Browser> {
+        if find_chrome(cfg).is_none()
+            && let Some(socket) = webview_socket()
+        {
+            return Ok(Browser::WebView { socket });
+        }
+        Browser::launch(cfg, profile, headless).await
+    }
+
     pub async fn launch(cfg: &BrowserCfg, profile: &Path, headless: bool) -> Result<Browser> {
         let exe = find_chrome(cfg).context("no Chrome/Chromium/Edge found; set [browser] path in config")?;
         std::fs::create_dir_all(profile)?;
@@ -77,7 +110,7 @@ impl Browser {
             if let Some(port) =
                 std::fs::read_to_string(&port_file).ok().and_then(|s| s.lines().next()?.trim().parse().ok())
             {
-                return Ok(Browser { child, port });
+                return Ok(Browser::Chrome { child, port });
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -85,11 +118,38 @@ impl Browser {
     }
 
     pub async fn new_page(&self) -> Result<Page> {
-        let url = format!("http://127.0.0.1:{}/json/new?about:blank", self.port);
+        let (port, socket) = match self {
+            Browser::Chrome { port, .. } => (*port, None),
+            Browser::WebView { socket } => (0, Some(socket.clone())),
+        };
+        if let Some(socket) = socket {
+            // The WebView has a fixed set of pages: the app's own UI on localhost and the web chat one.
+            let list: Value = serde_json::from_slice(&webview_get(&socket, "/json/list").await?)?;
+            let id = list
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|t| t["type"] == "page")
+                .find(|t| {
+                    let url = t["url"].as_str().unwrap_or("");
+                    !url.starts_with("http://127.0.0.1") && !url.starts_with("http://localhost")
+                })
+                .and_then(|t| t["id"].as_str())
+                .context("the app's web chat view is not running; reopen kron")?
+                .to_string();
+            let stream: Box<dyn Io> = Box::new(connect_abstract(&socket).await?);
+            let (ws, _) = tokio_tungstenite::client_async(format!("ws://localhost/devtools/page/{id}"), stream).await?;
+            let mut page = Page { ws, next: 0, target: id, port, webview: true };
+            page.call("Emulation.setFocusEmulationEnabled", json!({"enabled": true})).await.ok();
+            return Ok(page);
+        }
+        let url = format!("http://127.0.0.1:{port}/json/new?about:blank");
         let v: Value = local_http().put(&url).send().await?.json().await?;
         let ws = v["webSocketDebuggerUrl"].as_str().context("no page websocket")?;
-        let (ws, _) = tokio_tungstenite::connect_async(ws).await?;
-        let mut page = Page { ws, next: 0, target: v["id"].as_str().unwrap_or("").into(), port: self.port };
+        let stream: Box<dyn Io> = Box::new(TcpStream::connect(("127.0.0.1", port)).await?);
+        let (ws, _) = tokio_tungstenite::client_async(ws, stream).await?;
+        let mut page = Page { ws, next: 0, target: v["id"].as_str().unwrap_or("").into(), port, webview: false };
+        page.call("Emulation.setFocusEmulationEnabled", json!({"enabled": true})).await.ok();
         // Headless Chrome announces itself in the user agent; sites block that.
         let ua = page.call("Browser.getVersion", json!({})).await?["userAgent"]
             .as_str()
@@ -100,23 +160,69 @@ impl Browser {
     }
 
     /// Close gracefully so the profile (cookies) is flushed to disk.
-    pub async fn close(mut self) {
-        let url = format!("http://127.0.0.1:{}/json/version", self.port);
+    pub async fn close(self) {
+        let Browser::Chrome { mut child, port } = self else { return };
+        let url = format!("http://127.0.0.1:{port}/json/version");
         if let Ok(v) = async { local_http().get(&url).send().await?.json::<Value>().await }.await
             && let Some(ws) = v["webSocketDebuggerUrl"].as_str()
             && let Ok((mut ws, _)) = tokio_tungstenite::connect_async(ws).await
         {
             ws.send(WsMsg::Text(json!({"id": 1, "method": "Browser.close"}).to_string())).await.ok();
         }
-        tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await.ok();
+        tokio::time::timeout(Duration::from_secs(5), child.wait()).await.ok();
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+async fn connect_abstract(name: &str) -> Result<tokio::net::UnixStream> {
+    #[cfg(target_os = "android")]
+    use std::os::android::net::SocketAddrExt;
+    #[cfg(target_os = "linux")]
+    use std::os::linux::net::SocketAddrExt;
+    let addr = std::os::unix::net::SocketAddr::from_abstract_name(name)?;
+    let s = std::os::unix::net::UnixStream::connect_addr(&addr)
+        .with_context(|| format!("cannot reach the app's web chat view (@{name})"))?;
+    s.set_nonblocking(true)?;
+    Ok(tokio::net::UnixStream::from_std(s)?)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+async fn connect_abstract(_name: &str) -> Result<TcpStream> {
+    bail!("WebView web chats only work in the Android app")
+}
+
+/// GET on the WebView's DevTools HTTP endpoint; returns the body.
+async fn webview_get(socket: &str, path: &str) -> Result<Vec<u8>> {
+    let mut s = connect_abstract(socket).await?;
+    s.write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").as_bytes()).await?;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n =
+            tokio::time::timeout(Duration::from_secs(5), s.read(&mut chunk)).await.context("DevTools timed out")??;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        // The server may keep the connection open; stop once Content-Length is in.
+        if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+            let len = head.lines().find_map(|l| l.strip_prefix("content-length:")?.trim().parse::<usize>().ok());
+            if len.is_some_and(|len| buf.len() >= end + 4 + len) {
+                break;
+            }
+        }
+    }
+    let end = buf.windows(4).position(|w| w == b"\r\n\r\n").context("bad DevTools response")?;
+    Ok(buf.split_off(end + 4))
+}
+
 pub struct Page {
-    ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    ws: WebSocketStream<Box<dyn Io>>,
     next: u64,
     target: String,
     port: u16,
+    webview: bool,
 }
 
 impl Page {
@@ -153,6 +259,9 @@ impl Page {
     }
 
     pub async fn close(self) {
+        if self.webview {
+            return; // the app owns its one web chat page
+        }
         let url = format!("http://127.0.0.1:{}/json/close/{}", self.port, self.target);
         local_http().get(url).send().await.ok();
     }
@@ -189,6 +298,9 @@ pub async fn ask(
     }
     if !ready {
         let href = page.eval("location.href").await.unwrap_or_default();
+        if page.webview {
+            bail!("chat input not found on {href} — не выполнен вход? Войдите: ☰ → Настройки → Веб-чаты");
+        }
         bail!("chat input not found on {href} — not logged in? Run `kron browser login <site>`");
     }
     // Let a restored conversation render before counting replies.
@@ -249,15 +361,14 @@ pub async fn web_chat(cfg: &Config, site_name: &str, prompt: &str, url: Option<&
     let lock = BROWSER.get_or_init(Default::default);
     let mut guard = lock.lock().await;
     if guard.is_none() {
-        *guard = Some(Browser::launch(&cfg.browser, &profile_dir(cfg), cfg.browser.headless.unwrap_or(true)).await?);
+        *guard = Some(Browser::start(&cfg.browser, &profile_dir(cfg), cfg.browser.headless.unwrap_or(true)).await?);
     }
     let browser = guard.as_ref().unwrap();
     let mut page = match browser.new_page().await {
         Ok(p) => p,
         Err(_) => {
             // The browser died; start a fresh one.
-            *guard =
-                Some(Browser::launch(&cfg.browser, &profile_dir(cfg), cfg.browser.headless.unwrap_or(true)).await?);
+            *guard = Some(Browser::start(&cfg.browser, &profile_dir(cfg), cfg.browser.headless.unwrap_or(true)).await?);
             guard.as_ref().unwrap().new_page().await?
         }
     };

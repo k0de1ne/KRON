@@ -11,13 +11,19 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.PowerManager;
 import android.provider.Settings;
+import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.Button;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 import java.io.RandomAccessFile;
 
 /** The kron chat UI in a WebView, served by KronService on this phone. */
@@ -25,6 +31,9 @@ public class MainActivity extends Activity {
     static final int PORT = 7790;
     static final String UI = "http://127.0.0.1:" + PORT + "/";
     private WebView web;
+    /** Web chat sites, shown over the UI while the user signs in (see WebChat). */
+    private WebView sites;
+    private LinearLayout sitesBar;
     private int retries;
 
     @Override
@@ -45,6 +54,12 @@ public class MainActivity extends Activity {
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
                 Uri u = req.getUrl();
                 if ("127.0.0.1".equals(u.getHost()) && u.getPort() == PORT) return false;
+                // kron://webchat?url=... from Settings → Web chats: sign in to the site.
+                if ("kron".equals(u.getScheme())) {
+                    String url = u.getQueryParameter("url");
+                    if (url != null) showSites(url);
+                    return true;
+                }
                 // Sign-in pages and links open in the real browser; its redirect to
                 // localhost still reaches kron on this phone.
                 startActivity(new Intent(Intent.ACTION_VIEW, u));
@@ -67,8 +82,41 @@ public class MainActivity extends Activity {
                 if (url.startsWith(UI)) retries = 0;
             }
         });
-        setContentView(web);
+        FrameLayout root = new FrameLayout(this);
+        int bar = (int) (52 * getResources().getDisplayMetrics().density);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-1, -1);
+        lp.topMargin = bar;
+        sites = WebChat.attach(this, root, lp);
+        root.addView(web, new FrameLayout.LayoutParams(-1, -1));
+        sitesBar = new LinearLayout(this);
+        sitesBar.setGravity(Gravity.CENTER_VERTICAL);
+        sitesBar.setPadding(bar / 4, 0, bar / 4, 0);
+        TextView title = new TextView(this);
+        title.setText("Войдите на сайт и нажмите «Готово»");
+        sitesBar.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+        Button done = new Button(this);
+        done.setText("Готово");
+        done.setOnClickListener(v -> hideSites());
+        sitesBar.addView(done);
+        sitesBar.setVisibility(View.GONE);
+        root.addView(sitesBar, new FrameLayout.LayoutParams(-1, bar, Gravity.TOP));
+        styleBars();
+        setContentView(root);
         if (state == null || web.restoreState(state) == null) web.loadUrl(UI);
+    }
+
+    private void showSites(String url) {
+        sites.loadUrl(url);
+        web.setVisibility(View.INVISIBLE);
+        sitesBar.setVisibility(View.VISIBLE);
+        sites.requestFocus();
+    }
+
+    private void hideSites() {
+        android.webkit.CookieManager.getInstance().flush();
+        sitesBar.setVisibility(View.GONE);
+        web.setVisibility(View.VISIBLE);
+        web.requestFocus();
     }
 
     private void showLog(WebView view) {
@@ -121,6 +169,10 @@ public class MainActivity extends Activity {
         getWindow().setNavigationBarColor(bg);
         int flags = dark ? 0 : View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
         getWindow().getDecorView().setSystemUiVisibility(flags);
+        if (sitesBar != null) {
+            sitesBar.setBackgroundColor(bg);
+            ((TextView) sitesBar.getChildAt(0)).setTextColor(dark ? Color.WHITE : Color.BLACK);
+        }
     }
 
     @Override
@@ -142,8 +194,17 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onDestroy() {
+        WebChat.detach();
+        super.onDestroy();
+    }
+
+    @Override
     public void onBackPressed() {
-        if (web.canGoBack()) web.goBack();
+        if (sitesBar.getVisibility() == View.VISIBLE) {
+            if (sites.canGoBack()) sites.goBack();
+            else hideSites();
+        } else if (web.canGoBack()) web.goBack();
         else moveTaskToBack(true);
     }
 }

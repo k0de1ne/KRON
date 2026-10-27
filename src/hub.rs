@@ -179,7 +179,7 @@ impl Hub {
         let mut nodes = self.nodes.lock().unwrap();
         nodes.retain(|_, n| n.last_seen.elapsed() < NODE_TTL * 10);
         let mut out = vec![
-            json!({"name": self.name, "os": std::env::consts::OS, "cwd": self.workdir, "browser": !self.cfg().browser.disabled && crate::browser::find_chrome(&self.cfg().browser).is_some(), "hub": true}),
+            json!({"name": self.name, "os": std::env::consts::OS, "cwd": self.workdir, "browser": crate::browser::available(&self.cfg().browser), "hub": true}),
         ];
         for (name, n) in nodes.iter() {
             if n.last_seen.elapsed() < NODE_TTL && n.info["ephemeral"] != true {
@@ -213,6 +213,7 @@ async fn info(State(hub): State<Shared>, headers: HeaderMap, Query(q): Query<Tok
         "providers": providers,
         "agents": cfg.agents.keys().collect::<Vec<_>>(),
         "sites": cfg.sites.keys().collect::<Vec<_>>(),
+        "site_urls": cfg.sites.iter().map(|(n, s)| (n.clone(), s.url.clone())).collect::<std::collections::BTreeMap<_, _>>(),
     }))
     .into_response()
 }

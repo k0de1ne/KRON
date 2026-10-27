@@ -206,6 +206,10 @@ main { flex: 1; min-width: 0; display: flex; flex-direction: column; position: r
     <header><h2>Настройки</h2><button class="btn" id="closeSettings">Готово</button></header>
     <h3>Подписки</h3>
     <div id="provList"></div>
+    <div id="webBox" hidden>
+      <h3>Веб-чаты — вход на сайты для режима «веб-чат»</h3>
+      <div id="siteList"></div>
+    </div>
     <h3>Локальные модели — работают на этом устройстве, без интернета и лимитов</h3>
     <div id="modelList"></div>
     <h3>config.toml — провайдеры, ключи API, агенты, хаб</h3>
@@ -598,7 +602,7 @@ $('scrim').onclick = () => document.body.classList.remove('drawer');
 async function openSettings() {
   document.body.classList.remove('drawer');
   $('settings').hidden = false; $('cfgMsg').textContent = ''; $('cfgMsg').className = '';
-  renderProviders(); renderModels();
+  renderProviders(); renderSites(); renderModels();
   const c = await (await api('/api/config')).json();
   $('cfgText').value = c.text; $('cfgMsg').textContent = c.path;
 }
@@ -614,6 +618,20 @@ function renderProviders() {
     const b = el('button', 'btn' + (p.logged_in ? '' : ' main'), p.logged_in ? 'Войти заново' : 'Войти');
     b.onclick = () => signIn(p, row);
     row.append(b); box.append(row);
+  }
+}
+// In the Android app web chats run in its own WebView; sign in to the sites there.
+function renderSites() {
+  const android = /kron-android/.test(navigator.userAgent);
+  $('webBox').hidden = !android;
+  if (!android) return;
+  const box = $('siteList'); box.innerHTML = '';
+  for (const [name, url] of Object.entries(S.info.site_urls || {})) {
+    const row = el('div', 'prov'), n = el('div', 'n');
+    n.textContent = SITE_NAME[name] || name; const sm = el('small'); sm.textContent = url; n.append(sm);
+    const b = el('button', 'btn', 'Войти');
+    b.onclick = () => { location.href = 'kron://webchat?url=' + encodeURIComponent(url); };
+    row.append(n, b); box.append(row);
   }
 }
 const gb = n => (n / 1e9).toFixed(n < 1e9 ? 2 : 1) + ' ГБ';
