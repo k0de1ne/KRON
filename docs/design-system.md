@@ -19,7 +19,7 @@
 | Текст | `--fg`, `--fg-2`, `--muted` (все ≥ 4.5:1 на своих фонах, WCAG AA) |
 | Линии | `--line`, `--line-strong` |
 | Акцент и статусы | `--accent`, `--accent-text`, `--accent-soft`, `--ok`, `--warn`, `--danger` (+ `-soft`) |
-| Радиусы | `--r-xs 2` · `--r-sm 4` · `--r-md 6` · `--r-lg 8` · `--r-xl 10` (полных кругов и «таблеток» нет) |
+| Радиусы | `--r-xs 2` · `--r-sm 4` · `--r-md 6` · `--r-lg 8` · `--r-xl 10` (полных кругов и «таблеток» нет, в том числе у переключателей и индикаторов) |
 | Отступы | шаг 4 px: `--s-1 … --s-8` |
 | Тени | `--shadow-1` (карточка), `--shadow-2` (меню), `--shadow-3` (диалог) |
 | Движение | `--fast 120ms`, `--med 200ms`, `--ease`; при `prefers-reduced-motion` отключается |
@@ -38,4 +38,4 @@
 
 ## Логотип
 
-Залитый квадрат `--accent` на 2/3 поля иконки; слово `kron` — `--font`, 600. Файлы: `src/assets/icon.svg`, `icon-192.png`, `icon-512.png`, Android `ic_launcher.png`, `ic_stat.xml`. Минимальный размер — 16 px.
+Залитый квадрат на ~40% поля иконки (`#d97757` на `#1f1e1d`; в интерфейсе — `--accent`); слово `kron` — `--font`, 600. Файлы: `src/assets/icon.svg`, `icon-192.png`, `icon-512.png`, Android `ic_launcher.png`, `ic_stat.xml`. Минимальный размер — 16 px.

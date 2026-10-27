@@ -112,26 +112,28 @@ $('loginForm').onsubmit = e => {
 
 // ── Toasts, dialogs, menus ───────────────────────────────────────────────────
 function toast(text, {action, onAction, err, timeout = 4500, ic} = {}) {
-  const t = el('div', 'toast' + (err ? ' err' : ''));
+  for (const o of $('toasts').children) if (o.dataset.k === text) o.remove();
+  const t = el('div', 'toast' + (err ? ' err' : '')); t.dataset.k = text;
   t.innerHTML = (ic ? icon(ic, 'sm') : err ? icon('circle-alert', 'sm') : '') + `<span>${esc(text)}</span>`;
   let done = false;
   const close = () => { if (!done) { done = true; t.remove(); } };
   if (action) t.append(btn('', esc(action), () => { close(); onAction(); }));
+  if (err) t.append(btn('', icon('x', 'sm'), close, 'Закрыть'));
   $('toasts').append(t);
-  setTimeout(close, timeout);
+  if (!err) setTimeout(close, timeout);
   return close;
 }
-const fail = e => toast(String(e?.message || e), {err: true, timeout: 7000});
+const fail = e => toast(String(e?.message || e), {err: true});
 
 let traps = 0;
 /** Keep Tab inside a modal, hide the page behind it from assistive tech, and give focus back on release. */
 function trapFocus(box) {
   const back = document.activeElement, app = $('app');
   app.inert = true; traps++;
-  const sel = 'button:not([disabled]),[href],input:not([disabled]),select,textarea,[tabindex]:not([tabindex="-1"])';
+  const sel = 'button:not([disabled]),a[href],input:not([disabled]),select,textarea,[tabindex]:not([tabindex="-1"])';
   const onKey = e => {
     if (e.key !== 'Tab') return;
-    const f = [...box.querySelectorAll(sel)].filter(x => x.offsetParent !== null);
+    const f = [...box.querySelectorAll(sel)].filter(x => x.getClientRects().length);
     if (!f.length) return;
     const first = f[0], last = f[f.length - 1];
     if (!box.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
@@ -139,7 +141,7 @@ function trapFocus(box) {
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   };
   document.addEventListener('keydown', onKey, true);
-  return () => { document.removeEventListener('keydown', onKey, true); if (!--traps) app.inert = false; back?.isConnected && back.focus?.(); };
+  return () => { document.removeEventListener('keydown', onKey, true); if (!--traps) app.inert = false; (back?.isConnected ? back : $('text')).focus?.(); };
 }
 
 /** A modal: resolves to true / the input text, or null when dismissed. */
@@ -305,10 +307,12 @@ document.addEventListener('click', e => {
   if (b.dataset.act === 'wrap') box.classList.toggle('wrap');
 });
 
-/** [text for a person, needs sign-in] for the errors people actually hit. */
+/** [text for a person, 'login' | 'api' | false: which settings fix it] for the errors people actually hit. */
 function humanError(m) {
-  if (/no .*credentials|логин|run `kron login`|sign in|401|unauthor|expired|войти/i.test(m)) return ['Нужно войти в подписку. После входа нажмите «Повторить».', true];
-  if (/403|forbidden/i.test(m)) return ['Доступ запрещён: проверьте подписку или ключ API.', true];
+  const pr = S.pick?.kind === 'provider' ? provider(S.pick.name) : null, key = pr && !pr.oauth && pr.kind !== 'local';
+  if (key && /401|403|unauthor|forbidden|authentication|api.?key/i.test(m)) return ['Ключ API не принят. Проверьте его в настройках и нажмите «Повторить».', 'api'];
+  if (/no .*credentials|логин|run `kron login`|sign in|401|unauthor|expired|войти/i.test(m)) return ['Нужно войти в подписку. После входа нажмите «Повторить».', 'login'];
+  if (/403|forbidden/i.test(m)) return ['Доступ запрещён: проверьте подписку или ключ API.', 'login'];
   if (/429|rate.?limit|quota/i.test(m)) return ['Лимит запросов исчерпан. Подождите или выберите другую модель.', false];
   if (/failed to fetch|networkerror|network|timed? ?out|connection (refused|reset)|dns/i.test(m)) return ['Нет связи. Проверьте сеть и повторите.', false];
   return [m, false];
@@ -323,6 +327,7 @@ function toggleSide(open = !sideOpen()) {
   else { document.body.classList.toggle('side-closed', !open); store('side', open ? null : 'closed'); }
 }
 if (document.documentElement.classList.contains('side-closed-init')) document.body.classList.add('side-closed');
+if (/Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)) document.querySelectorAll('.kbd').forEach(k => { k.textContent = k.textContent.replace(/Ctrl/g, '⌘').replace(/Shift/g, '⇧'); });
 syncDrawer();
 $('sideClose').onclick = () => toggleSide(false);
 $('sideOpen').onclick = () => toggleSide(true);
@@ -778,7 +783,7 @@ class Turn {
     if (msg === 'stopped') { this.root.append(el('div', 'note', icon('square', 'xs') + 'Остановлено')); return; }
     const [human, needLogin] = humanError(msg);
     const box = el('div', 'err-box', icon('circle-alert', 'sm') + `<span class="t">${esc(human)}${human !== msg ? `<details><summary>Подробности</summary><code>${esc(msg)}</code></details>` : ''}</span>`);
-    if (needLogin) box.append(btn('btn sm primary', 'Войти', () => openSettings('accounts')));
+    if (needLogin) box.append(btn('btn sm primary', needLogin === 'api' ? 'Ключ API' : 'Войти', () => openSettings(needLogin === 'api' ? 'api' : 'accounts')));
     if (!this.live || this.retry) box.append(btn('btn sm', icon('refresh-cw', 'xs') + 'Повторить', () => this.retry ? this.retry() : retryTurn(+this.root.dataset.n)));
     this.root.append(box);
   }
@@ -866,7 +871,10 @@ async function openThread(name, {keepDraft} = {}) {
     else if (!t) { const u = records.find(r => r.role === 'user'); setTitle(u ? u.content.slice(0, 80) : ''); }
     restoreSettings(meta.settings);
     if (active.run) { render(records, active.base); follow(active.run); }
-    else render(records);
+    else {
+      render(records);
+      if (records.at(-1)?.role === 'user') { const t = new Turn(); t.error('Ответа нет: запрос не завершился.'); t.finish(); }
+    }
   } else {
     restoreSettings(null);
   }
@@ -923,7 +931,7 @@ function modelMenu() {
       label: p.name, sub: (S.models[p.name] || p.model) + ' · ' + (KIND[p.kind] || p.kind),
       meta: p.oauth && !p.logged_in ? '<span class="badge warn">нужен вход</span>' : '',
       on: sel('provider', p.name),
-      onClick: () => { choose({kind: 'provider', name: p.name}); if (p.oauth && !p.logged_in) toast('Сначала войдите в подписку', {action: 'Войти', onAction: () => openSettings('accounts')}); },
+      onClick: () => choose({kind: 'provider', name: p.name}),
     });
   }
   if (S.info.agents.length) {
@@ -957,7 +965,7 @@ function nodesFor() {
 const nodeIcon = n => !n ? 'monitor' : n.os === 'android' ? 'smartphone' : n.hub && n.os === 'linux' ? 'server' : n.os === 'windows' || n.os === 'macos' ? 'laptop' : 'monitor';
 const ACCESS = {
   full: ['shield', 'Полный доступ', 'Команды и правки без вопросов', 'Полный'],
-  ask: ['shield-check', 'Спрашивать', 'Подтверждать команды и изменения файлов', 'Спрашивать'],
+  ask: ['shield-check', 'Спрашивать', 'Подтверждать команды и изменения файлов', 'Вопросы'],
   read: ['eye', 'Только чтение', 'Смотреть файлы и искать, ничего не менять', 'Чтение'],
 };
 /** Chip text with a shorter variant for phones. */
@@ -1001,7 +1009,7 @@ function refreshControls() {
   }
   if (agentMode) {
     const [ic, label, , short] = ACCESS[S.access] || ACCESS.full;
-    const c = btn('chip' + (S.access === 'ask' ? ' okc' : S.access === 'read' ? ' on' : ''), icon(ic, 'sm') + `<span class="t">${label2(label, short)}</span>`,
+    const c = btn('chip' + (S.access === 'full' ? ' warnc' : S.access === 'read' ? ' on' : ''), icon(ic, 'sm') + `<span class="t">${label2(label, short)}</span>`,
       () => menu(c, accessMenu, {place: 'above'}), 'Что агенту можно без вопросов');
     chips.append(c);
   }
@@ -1082,6 +1090,7 @@ const text = $('text');
 function grow() {
   text.style.height = 'auto';
   text.style.height = Math.min(text.scrollHeight, innerHeight * 0.4) + 'px';
+  document.documentElement.style.setProperty('--comp-h', $('composerWrap').offsetHeight + 'px');
   const has = text.value.trim() || S.attachments.length;
   const sendBtn = $('send');
   const stop = S.busy && !S.ask;
@@ -1481,7 +1490,7 @@ function openSettings(tab = settingsTab) {
   pane.append(header, body); sheet.append(nav, pane);
   settingsEl.innerHTML = ''; settingsEl.append(sheet);
   const firstOpen = !settingsEl.dataset.trap;
-  if (firstOpen) { settingsEl.dataset.trap = '1'; settingsEl.release = trapFocus(sheet); settingsEl.setAttribute('aria-hidden', 'false'); }
+  if (firstOpen) { settingsEl.dataset.trap = '1'; settingsEl.release = trapFocus(settingsEl); settingsEl.setAttribute('aria-hidden', 'false'); }
   sheet.setAttribute('aria-label', 'Настройки');
   ({accounts: tabAccounts, api: tabApi, local: tabLocal, machines: tabMachines, look: tabLook, config: tabConfig, keys: tabKeys})[tab](body);
   const cur = nav.querySelector('[aria-selected="true"]');
@@ -1688,7 +1697,11 @@ function openPalette() {
   inp.placeholder = 'Команда или поиск по чатам…'; inp.setAttribute('aria-label', 'Команда или поиск');
   q.append(inp, el('span', 'kbd', 'Esc')); box.append(q, res); paletteEl.append(box);
   paletteEl.onclick = e => { if (e.target === paletteEl) closePalette(); };
+  box.setAttribute('role', 'dialog'); box.setAttribute('aria-modal', 'true'); box.setAttribute('aria-label', 'Команды и поиск');
+  res.setAttribute('role', 'listbox'); res.id = 'paletteRes'; res.tabIndex = -1;
+  inp.setAttribute('role', 'combobox'); inp.setAttribute('aria-expanded', 'true'); inp.setAttribute('aria-controls', 'paletteRes'); inp.setAttribute('aria-autocomplete', 'list');
   document.body.append(paletteEl);
+  paletteEl.release = trapFocus(paletteEl);
   const actions = [
     ['square-pen', 'Новый чат', () => openThread(null)],
     ['folder', 'Файлы на машине', () => openFiles(S.cwd() || '')],
@@ -1722,6 +1735,8 @@ function openPalette() {
     const add = it => {
       const b = el('button', 'mi' + (i === sel ? ' kb' : ''), icon(it.ic) + `<span class="txt"><b>${esc(it.label)}</b>${it.sub ? `<small>${esc(it.sub)}</small>` : ''}</span>`);
       const idx = i++;
+      b.setAttribute('role', 'option'); b.id = 'pal' + idx; b.tabIndex = -1; b.setAttribute('aria-selected', idx === sel);
+      if (idx === sel) inp.setAttribute('aria-activedescendant', b.id);
       b.onmouseenter = () => { sel = idx; res.querySelectorAll('.mi').forEach((x, j) => x.classList.toggle('kb', j === sel)); };
       b.onclick = () => { closePalette(); it.run(); };
       res.append(b);
@@ -1745,7 +1760,7 @@ function openPalette() {
   };
   draw(); inp.focus();
 }
-function closePalette() { paletteEl?.remove(); paletteEl = null; }
+function closePalette() { paletteEl?.release?.(); paletteEl?.remove(); paletteEl = null; }
 
 // ── Header thread menu & global keys ─────────────────────────────────────────
 $('threadMenuBtn').onclick = () => {
