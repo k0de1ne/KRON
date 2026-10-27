@@ -222,7 +222,7 @@ public class MainActivity extends Activity {
     private void styleBars() {
         boolean dark = (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
                 == Configuration.UI_MODE_NIGHT_YES;
-        int bg = dark ? Color.parseColor("#1f1e1d") : Color.parseColor("#faf9f5");
+        int bg = dark ? Color.parseColor("#0e1014") : Color.parseColor("#f5f6f8");
         if (barsColor != null) {
             try {
                 bg = Color.parseColor(barsColor);

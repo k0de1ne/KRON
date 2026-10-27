@@ -266,7 +266,7 @@ function applyTheme() {
   if (t === 'system') delete root.dataset.theme; else root.dataset.theme = t;
   const z = store('textsize'); if (z) root.dataset.text = z; else delete root.dataset.text;
   const dark = t === 'dark' || (t === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
-  try { android?.setBars?.(dark ? '#1f1e1d' : '#faf9f5', dark); } catch {}
+  try { android?.setBars?.(dark ? '#0e1014' : '#f5f6f8', dark); } catch {}
 }
 matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', applyTheme);
 applyTheme();

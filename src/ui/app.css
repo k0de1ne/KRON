@@ -4,21 +4,21 @@
 /* ── Tokens ─────────────────────────────────────────────────────────────── */
 :root {
   color-scheme: light;
-  --bg: #faf9f5;
+  --bg: #f5f6f8;
   --surface: #ffffff;
-  --surface-2: #f5f3ec;
-  --sidebar: #f3f1ea;
-  --fg: #1a1918;
-  --fg-2: #3d3c38;
-  --muted: #6b6962;
-  --line: #e6e3d9;
-  --line-strong: #d3cfc2;
-  --hover: rgba(26, 25, 24, .055);
-  --active: rgba(26, 25, 24, .09);
-  --accent: #b5512f;
-  --accent-text: #b5512f;
+  --surface-2: #eceef2;
+  --sidebar: #eceef2;
+  --fg: #0f1218;
+  --fg-2: #2b303a;
+  --muted: #596070;
+  --line: #dde0e7;
+  --line-strong: #c6cad4;
+  --hover: rgba(15, 18, 24, .055);
+  --active: rgba(15, 18, 24, .09);
+  --accent: #2a47f0;
+  --accent-text: #2a47f0;
   --accent-fg: #ffffff;
-  --accent-soft: rgba(181, 81, 47, .1);
+  --accent-soft: rgba(42, 71, 240, .09);
   --ok: #15803d;
   --warn: #b45309;
   --danger: #b91c1c;
@@ -27,12 +27,12 @@
   --ok-soft: rgba(21, 128, 61, .09);
   --add: rgba(21, 128, 61, .12);
   --del: rgba(185, 28, 28, .1);
-  --code: #f5f3ec;
-  --scrim: rgba(20, 19, 18, .4);
+  --code: #eef0f4;
+  --scrim: rgba(10, 12, 18, .42);
   --shadow-1: 0 1px 2px rgba(0, 0, 0, .05), 0 1px 1px rgba(0, 0, 0, .03);
   --shadow-2: 0 4px 16px rgba(0, 0, 0, .07), 0 1px 3px rgba(0, 0, 0, .05);
   --shadow-3: 0 16px 48px rgba(0, 0, 0, .16), 0 2px 8px rgba(0, 0, 0, .06);
-  --focus: 0 0 0 2px var(--bg), 0 0 0 4px rgba(181, 81, 47, .55);
+  --focus: 0 0 0 2px var(--bg), 0 0 0 4px rgba(42, 71, 240, .55);
 
   --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Code", Menlo, Consolas, "Liberation Mono", monospace;
@@ -57,30 +57,30 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --bg: #1f1e1d; --surface: #2a2927; --surface-2: #262523; --sidebar: #181817;
-    --fg: #f2f1ec; --fg-2: #d9d7cf; --muted: #a3a198; --line: #383733; --line-strong: #4a4944;
+    --bg: #0e1014; --surface: #181b21; --surface-2: #14171c; --sidebar: #0a0b0e;
+    --fg: #eceef3; --fg-2: #cfd3dc; --muted: #9aa2b2; --line: #252932; --line-strong: #353b47;
     --hover: rgba(255, 255, 255, .06); --active: rgba(255, 255, 255, .1);
-    --accent-text: #e8957a; --accent-soft: rgba(232, 149, 122, .14);
+    --accent: #4560ff; --accent-text: #93a5ff; --accent-soft: rgba(106, 130, 255, .16);
     --ok: #4ade80; --warn: #fbbf24; --danger: #f87171;
     --danger-soft: rgba(248, 113, 113, .12); --warn-soft: rgba(251, 191, 36, .1); --ok-soft: rgba(74, 222, 128, .1);
     --add: rgba(74, 222, 128, .14); --del: rgba(248, 113, 113, .14);
-    --code: #171716; --scrim: rgba(0, 0, 0, .55);
+    --code: #090a0d; --scrim: rgba(0, 0, 0, .55);
     --shadow-2: 0 4px 16px rgba(0, 0, 0, .35); --shadow-3: 0 16px 48px rgba(0, 0, 0, .5);
-    --focus: 0 0 0 2px var(--bg), 0 0 0 4px rgba(232, 149, 122, .6);
+    --focus: 0 0 0 2px var(--bg), 0 0 0 4px rgba(120, 140, 255, .65);
   }
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #1f1e1d; --surface: #2a2927; --surface-2: #262523; --sidebar: #181817;
-  --fg: #f2f1ec; --fg-2: #d9d7cf; --muted: #a3a198; --line: #383733; --line-strong: #4a4944;
+  --bg: #0e1014; --surface: #181b21; --surface-2: #14171c; --sidebar: #0a0b0e;
+  --fg: #eceef3; --fg-2: #cfd3dc; --muted: #9aa2b2; --line: #252932; --line-strong: #353b47;
   --hover: rgba(255, 255, 255, .06); --active: rgba(255, 255, 255, .1);
-  --accent-text: #e8957a; --accent-soft: rgba(232, 149, 122, .14);
+  --accent: #4560ff; --accent-text: #93a5ff; --accent-soft: rgba(106, 130, 255, .16);
   --ok: #4ade80; --warn: #fbbf24; --danger: #f87171;
   --danger-soft: rgba(248, 113, 113, .12); --warn-soft: rgba(251, 191, 36, .1); --ok-soft: rgba(74, 222, 128, .1);
   --add: rgba(74, 222, 128, .14); --del: rgba(248, 113, 113, .14);
-  --code: #171716; --scrim: rgba(0, 0, 0, .55);
+  --code: #090a0d; --scrim: rgba(0, 0, 0, .55);
   --shadow-2: 0 4px 16px rgba(0, 0, 0, .35); --shadow-3: 0 16px 48px rgba(0, 0, 0, .5);
-  --focus: 0 0 0 2px var(--bg), 0 0 0 4px rgba(232, 149, 122, .6);
+  --focus: 0 0 0 2px var(--bg), 0 0 0 4px rgba(120, 140, 255, .65);
 }
 
 /* Touch screens: 44px targets (Apple HIG, WCAG 2.5.5). */
