@@ -1,4 +1,4 @@
-/* kron UI. Design tokens first, then components, then layout.
+/* kron UI (design system: docs/design-system.md). Design tokens first, then components, then layout.
    Text colors meet WCAG 2.2 AA (4.5:1) on their backgrounds in both themes. */
 
 /* ── Tokens ─────────────────────────────────────────────────────────────── */
@@ -39,7 +39,7 @@
   --mono: ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Code", Menlo, Consolas, "Liberation Mono", monospace;
   --text: 16px;
 
-  --r-xs: 6px; --r-sm: 8px; --r-md: 12px; --r-lg: 16px; --r-xl: 22px; --r-full: 999px;
+  --r-xs: 2px; --r-sm: 4px; --r-md: 6px; --r-lg: 8px; --r-xl: 10px; --r-full: 6px;
   --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 20px; --s-6: 24px; --s-8: 32px;
 
   --ease: cubic-bezier(.2, .8, .2, 1);
@@ -172,7 +172,7 @@ a { color: var(--accent-text); }
 .badge.warn { color: var(--warn); background: var(--warn-soft); border-color: transparent; }
 .badge.accent { color: var(--accent-text); background: var(--accent-soft); border-color: transparent; }
 
-.kbd { font: 11px/1 var(--mono); padding: 3px 5px; border-radius: 5px; border: 1px solid var(--line-strong); border-bottom-width: 2px; color: var(--muted); background: var(--surface); }
+.kbd { font: 11px/1 var(--mono); padding: 3px 5px; border-radius: var(--r-sm); border: 1px solid var(--line-strong); border-bottom-width: 2px; color: var(--muted); background: var(--surface); }
 
 .input, .select, .textarea {
   width: 100%; min-height: var(--tap); padding: 8px 12px; border-radius: var(--r-md);
@@ -311,12 +311,12 @@ body.side-closed #sideOpen { display: inline-grid; }
 
 #scroll { flex: 1; overflow-y: auto; overflow-anchor: none; scroll-padding-bottom: 24px; }
 #log { max-width: var(--col); margin: 0 auto; padding: 8px 24px 32px; }
-#toBottom { position: absolute; left: 50%; transform: translateX(-50%); bottom: calc(100% + 10px); width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow-2); color: var(--fg-2); animation: rise var(--med) var(--ease); }
+#toBottom { position: absolute; left: 50%; transform: translateX(-50%); bottom: calc(100% + 10px); width: 36px; height: 36px; border-radius: var(--r-md); display: grid; place-items: center; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow-2); color: var(--fg-2); animation: rise var(--med) var(--ease); }
 
 /* Empty state */
 #empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 0 24px 6vh; text-align: center; }
 #empty .logo { width: 44px; height: 44px; color: var(--accent); margin-bottom: 14px; }
-#empty h1 { font: 400 clamp(26px, 4vw, 34px)/1.2 var(--serif); margin: 0; letter-spacing: -.01em; }
+#empty h1 { font: 600 clamp(24px, 4vw, 30px)/1.2 var(--font); margin: 0; letter-spacing: -.01em; }
 #empty .ctx { margin: 10px 0 0; color: var(--muted); font-size: 14px; display: flex; gap: 6px; align-items: center; justify-content: center; flex-wrap: wrap; }
 .sugg { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 28px; width: 100%; max-width: 640px; }
 .sugg button { text-align: left; padding: 12px 14px; border-radius: var(--r-lg); border: 1px solid var(--line); background: var(--surface); font-size: 14px; color: var(--fg-2); display: flex; gap: 10px; align-items: flex-start; transition: all var(--fast); box-shadow: var(--shadow-1); }
@@ -327,7 +327,7 @@ body:not(.has-log) #scroll { display: none; }
 
 /* ── Messages ──────────────────────────────────────────────────────────── */
 .msg-user { display: flex; flex-direction: column; align-items: flex-end; margin: 28px 0 14px; }
-.msg-user .b { background: var(--surface-2); border: 1px solid var(--line); padding: 10px 16px; border-radius: 20px 20px 6px 20px; max-width: min(85%, 640px); white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere; }
+.msg-user .b { background: var(--surface-2); border: 1px solid var(--line); padding: 10px 16px; border-radius: var(--r-lg); max-width: min(85%, 640px); white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere; }
 .msg-user .files { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; margin-bottom: 6px; max-width: 85%; }
 .msg-user .edit { width: min(100%, 640px); }
 .msg-user .edit textarea { width: 100%; min-height: 80px; border-radius: var(--r-lg); border: 1px solid var(--accent); padding: 10px 14px; background: var(--surface); resize: vertical; box-shadow: 0 0 0 3px var(--accent-soft); }
@@ -354,7 +354,7 @@ body:not(.has-log) #scroll { display: none; }
 .md a { color: var(--accent-text); text-underline-offset: 2px; }
 .md blockquote { margin: 0 0 14px; padding: 2px 0 2px 16px; border-left: 3px solid var(--line-strong); color: var(--fg-2); }
 .md hr { border: 0; border-top: 1px solid var(--line); margin: 20px 0; }
-.md code { font: .875em/1.5 var(--mono); background: var(--code); padding: 2px 5px; border-radius: 5px; border: 1px solid var(--line); }
+.md code { font: .875em/1.5 var(--mono); background: var(--code); padding: 2px 5px; border-radius: var(--r-sm); border: 1px solid var(--line); }
 .md img { max-width: 100%; border-radius: var(--r-md); }
 .md .tbl { overflow-x: auto; margin: 0 0 14px; border: 1px solid var(--line); border-radius: var(--r-md); }
 .md table { border-collapse: collapse; width: 100%; font-size: 14px; }
@@ -371,7 +371,7 @@ body:not(.has-log) #scroll { display: none; }
 .code pre { margin: 0; padding: 12px 14px; overflow-x: auto; }
 .code pre code { background: none; border: 0; padding: 0; font: 13px/1.55 var(--mono); white-space: pre; }
 .code.wrap pre code { white-space: pre-wrap; word-break: break-word; }
-.caret:empty::after, .caret > :last-child::after { content: ""; display: inline-block; width: .5em; height: 1.05em; margin-left: 2px; vertical-align: -.15em; background: var(--accent); border-radius: 2px; animation: blink 1s steps(2) infinite; }
+.caret:empty::after, .caret > :last-child::after { content: ""; display: inline-block; width: .5em; height: 1.05em; margin-left: 2px; vertical-align: -.15em; background: var(--accent); animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
 /* Thinking */
