@@ -23,10 +23,13 @@ const surface = {
   id: 's-test', thread: 't1', title: 'Тестовая панель', intent: 'server', request: 'test', root: 'root', version: 1,
   created: Date.now(), updated: Date.now(), pinned: false,
   components: [
-    {id: 'root', component: 'Column', children: ['h', 'metrics', 'filter', 'tbl', 'tabs', 'todo', 'name', 'flag', 'set', 'run', 'log', 'frame', 'bad']},
+    {id: 'root', component: 'Column', children: ['h', 'metrics', 'sum', 'load', 'picked', 'filter', 'tbl', 'tabs', 'todo', 'name', 'flag', 'set', 'run', 'log', 'frame', 'bad']},
     {id: 'h', component: 'Heading', text: {path: '/title'}, level: 1},
     {id: 'metrics', component: 'Grid', children: {path: '/metrics', componentId: 'metric'}},
-    {id: 'metric', component: 'Metric', label: {path: 'label'}, value: {path: 'value'}},
+    {id: 'metric', component: 'Metric', label: {path: 'label'}, value: {path: 'value'}, hint: {expr: "upper(@label) + ' / ' + len(/metrics)"}},
+    {id: 'sum', component: 'Metric', label: 'Всего CPU', value: {expr: 'sum(/rows/*/cpu)'}, hint: {expr: "count(/rows/*/status, 'ok') + ' из ' + len(/rows) + ' в норме'"}},
+    {id: 'load', component: 'Metric', label: 'Нагрузка', value: {path: '/load'}},
+    {id: 'picked', component: 'Badge', text: {expr: "'Выбрано: ' + join(/show)"}, visible: {expr: 'len(/show) > 0'}},
     {id: 'filter', component: 'ChoicePicker', label: 'Статус', value: {path: '/show'}, options: ['ok', 'down'], multiple: true},
     {id: 'tbl', component: 'Table', rows: {path: '/rows'}, rowKey: 'id', search: true, filter: {key: 'status', path: '/show'},
       columns: [{key: 'name', label: 'Сервис', editable: true}, {key: 'cpu', label: 'CPU', type: 'number'}, {key: 'status', label: 'Статус', type: 'badge'}]},
@@ -50,6 +53,8 @@ const surface = {
     form: {name: 'исходное', on: false}, out: [],
   },
   stats: {}, audit: [],
+  sources: [{id: 'load', tool: {name: 'shell', args: {command: 'echo 42'}}, target: '/load', every: 2, parse: 'number'}],
+  alerts: [{id: 'hi', when: '/load > 40', text: {expr: "'Нагрузка ' + /load"}, tone: 'danger'}],
 };
 
 function setup() {
@@ -82,7 +87,17 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
 
     // Bindings and templates.
     assert.equal(await page.textContent('.g-h1'), 'Сервер');
-    assert.equal(await page.locator('.g-metric').count(), 2);
+    assert.equal(await page.locator('.g-grid .g-metric').count(), 2);
+    // Expressions: computed values, relative paths in templates, visibility.
+    assert.equal(await page.textContent('[data-gid=sum] .v'), '55');
+    assert.equal(await page.textContent('[data-gid=sum] .h'), '2 из 3 в норме');
+    assert.equal(await page.locator('.g-grid .g-metric .h').first().textContent(), 'НАГРУЗКА / 2');
+    assert.ok(await page.locator('[data-gid=picked]').isHidden());
+    assert.deepEqual(await page.evaluate(() => [
+      expr('2 + 3 * 4'), expr('max(/rows/*/cpu) / 2'), expr("pluck(where(/rows, 'status', 'down'), 'name')"),
+      expr("/form/name == 'исходное' && !/form/on ? 'да' : 'нет'"), expr('/missing ?? -1'), expr('pct(1, 3)'),
+    ]), [14, 20, ['db'], 'да', -1, 33.3]);
+    assert.match(await page.evaluate(() => { try { expr('1 +'); } catch (e) { return e.message; } }), /формула/);
     // A broken component does not take the surface down.
     assert.equal(await page.locator('.g-table').count(), 2);
 
@@ -92,7 +107,9 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
     assert.deepEqual(await names(), ['cache', 'nginx', 'db']);
     await page.click('.g-choices .chip:has-text("down")');
     assert.deepEqual(await names(), ['db']);
+    assert.equal(await page.textContent('[data-gid=picked]'), 'Выбрано: down');
     await page.click('.g-choices .chip:has-text("down")');
+    assert.ok(await page.locator('[data-gid=picked]').isHidden());
     await page.locator('.g-table').first().locator('input[type=search]').fill('ngi');
     await wait(300);
     assert.deepEqual(await names(), ['nginx']);
@@ -127,6 +144,21 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
     await page.click('.dialog .btn.primary');
     await page.waitForFunction(() => (G.data.out || []).some(l => l.includes('hello-from-ui')));
 
+    // Live data: a shell source waits for the person's approval, then keeps the value fresh.
+    await page.waitForSelector('.g-livebox:not([hidden])');
+    assert.match(await page.textContent('.g-livebox'), /echo 42/);
+    await page.click('.g-livebox .btn.primary');
+    await page.waitForFunction(() => G.data.load === 42);
+    assert.equal(await page.textContent('[data-gid=load] .v'), '42');
+    // The alert's condition became true.
+    await page.waitForSelector('.g-alert.err');
+    assert.equal(await page.textContent('.g-alert'), 'Нагрузка 42');
+    await page.evaluate(() => applyData('/load', 1));
+    assert.ok(await page.locator('.g-alerts').isHidden());
+    await page.waitForFunction(() => G.data.load === 42, null, {timeout: 6000}); // the timer ran again
+    const live = await get('/api/surfaces/s-test');
+    assert.equal(live.data.load, 42);
+
     // Everything was saved on the hub.
     await page.evaluate(() => saveData());
     await wait(400);
@@ -145,6 +177,29 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
     await page.evaluate(() => undo(1));
     await page.waitForFunction(() => G.data.form.name === 'исходное');
     assert.ok((await get('/api/surfaces/s-test')).version > before);
+
+    // The person rearranges the interface: move, hide, and undo.
+    await page.click('.g-bar button[title="Интерфейс"]');
+    await page.click('.menu button:has-text("Настроить интерфейс")');
+    await page.waitForSelector('.g-editbox');
+    await page.locator('.g-editbox[data-gid=h] button[title="Ниже"]').click();
+    await page.waitForFunction(() => G.byId.get('root').children[0] === 'metrics');
+    await page.locator('.g-editbox[data-gid=bad] button[title="Скрыть"]').click();
+    await page.waitForFunction(() => !G.byId.has('bad'));
+    assert.equal(await page.locator('.g-table').count(), 1);
+    const laid = await get('/api/surfaces/s-test');
+    assert.deepEqual(laid.components.find(c => c.id === 'root').children.slice(0, 2), ['metrics', 'h']);
+    await page.evaluate(() => undo());
+    await page.waitForFunction(() => G.byId.has('bad'));
+    // Pointing at a block and saying what to change goes to the agent as [ui-edit].
+    await page.evaluate(() => { window.sent = []; window.send = t => sent.push(t); });
+    await page.locator('.g-editbox[data-gid=tbl] button:has-text("Изменить")').click();
+    await page.fill('.dialog input', 'покажи как график');
+    await page.click('.dialog .btn.primary');
+    const sent = await page.evaluate(() => window.sent);
+    assert.equal(sent.length, 1);
+    assert.deepEqual(JSON.parse(sent[0].replace('[ui-edit] ', '')), {component: 'tbl', type: 'Table', request: 'покажи как график'});
+    assert.equal(await page.locator('.g-editbox').count(), 0);
 
     // Use is reported and learned.
     await page.evaluate(() => flushSignals());

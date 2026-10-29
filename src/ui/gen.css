@@ -45,6 +45,37 @@ body.surface.activity #log { padding: 8px 16px 24px; }
 .g-fallback > div { flex: 1 1 260px; } .g-fallback p { color: var(--muted); margin: 4px 0 0; font-size: 14px; }
 .g-fallback > .ic { color: var(--warn); }
 
+/* ── Live data, alerts, editing ─────────────────────────────────────────── */
+.g-livebox, .g-alerts, .g-editnote { max-width: 1148px; margin: 8px auto 0; }
+.g-livebox:not([hidden]), .g-alerts:not([hidden]) { display: block; }
+.g-livebox { margin-left: max(16px, calc((100% - 1148px) / 2)); margin-right: max(16px, calc((100% - 1148px) / 2)); padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--shadow-1); }
+.g-livehead { display: flex; gap: 8px; align-items: center; color: var(--accent-text); }
+.g-livebox p { margin: 4px 0 8px; color: var(--muted); font-size: 14px; }
+.g-livebox ul { margin: 0 0 10px; padding: 0; list-style: none; display: grid; gap: 4px; }
+.g-livebox li { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.g-livebox code { font: 13px/1.4 var(--mono); background: var(--surface-2); padding: 2px 6px; border-radius: 6px; overflow-wrap: anywhere; }
+.g-livebox small { color: var(--muted); }
+.g-alerts { display: grid; gap: 6px; padding: 0 16px; }
+.g-alert { display: flex; gap: 8px; align-items: center; padding: 8px 12px; border-radius: var(--r-md); font-size: 14px; background: var(--warn-soft); color: var(--warn); }
+.g-alert span { color: var(--fg); }
+.g-alert.err { background: var(--danger-soft); color: var(--danger); }
+.g-alert.ok { background: var(--ok-soft); color: var(--ok); }
+.g-alert.info { background: var(--accent-soft); color: var(--accent-text); }
+.g-bar .g-live.on { color: var(--ok); }
+.g-bar .g-live.on .ic { animation: g-beat 2.4s ease-in-out infinite; }
+.g-bar .g-live.bad { color: var(--warn); }
+@keyframes g-beat { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .g-bar .g-live.on .ic { animation: none; } }
+.g-editnote { padding: 0 16px; color: var(--muted); font-size: 13px; display: flex; gap: 8px; align-items: center; }
+.g-editnote span { flex: 1; }
+.g-livebox .row-end { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+@media (max-width: 520px) { .g-bar .g-edit { display: none; } }
+.g-editbox { position: relative; border: 1px dashed var(--line-strong); border-radius: var(--r-md); padding: 6px; min-width: 0; }
+.g-editbox:hover, .g-editbox:focus-within { border-color: var(--accent); }
+.g-edittools { display: flex; gap: 2px; align-items: center; flex-wrap: wrap; margin: -2px 0 6px; }
+.g-editname { flex: 1; min-width: 0; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 4px; }
+.g-edittools .btn.sm { margin-left: 4px; }
+
 /* ── Start screen ───────────────────────────────────────────────────────── */
 .sugg.g-home { display: block; width: 100%; max-width: 720px; margin-top: 22px; }
 .g-hhead { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 13px; margin: 0 2px 8px; }

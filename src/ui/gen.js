@@ -35,6 +35,198 @@ const ptr = {
   overlaps(a, b) { const x = a.replace(/\/$/, '') + '/', y = b.replace(/\/$/, '') + '/'; return x.startsWith(y) || y.startsWith(x); },
 };
 
+// ── Expressions: {"expr": "..."} computed on the device, without the model ───
+/* A small safe language (no eval): numbers, 'text', true/false/null, data paths
+   (/a/b, @field inside a child template, * collects from every element),
+   + - * / % == != < <= > >= && || ! ?: ?? and the functions in FN. */
+const EXPR_CACHE = new Map();
+function exprTokens(src) {
+  const out = [], seg = /[\p{L}\p{N}_\-.~$]/u;
+  let i = 0;
+  const operand = () => { const t = out.at(-1); return !t || (t.t === 'op' && t.v !== ')'); };
+  const readSegs = (path) => {
+    while (src[i] === '/' && (src[i + 1] === '*' || seg.test(src[i + 1] || ''))) {
+      i++;
+      if (src[i] === '*') { path.push('*'); i++; continue; }
+      let s = '';
+      while (i < src.length && seg.test(src[i])) s += src[i++];
+      path.push(s.replace(/~1/g, '/').replace(/~0/g, '~'));
+    }
+    return path;
+  };
+  while (i < src.length) {
+    const c = src[i];
+    if (/\s/.test(c)) { i++; continue; }
+    if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(src[i + 1] || ''))) {
+      const m = /^\d*\.?\d+(?:e[+-]?\d+)?/i.exec(src.slice(i)); out.push({t: 'num', v: +m[0]}); i += m[0].length; continue;
+    }
+    if (c === '"' || c === "'") {
+      let s = ''; i++;
+      while (i < src.length && src[i] !== c) { if (src[i] === '\\' && i + 1 < src.length) i++; s += src[i++]; }
+      if (src[i] !== c) throw new Error('не закрыта строка');
+      i++; out.push({t: 'str', v: s}); continue;
+    }
+    if (c === '/' && operand()) {
+      const path = (src[i + 1] === '*' || seg.test(src[i + 1] || '')) ? readSegs([]) : (i++, []);
+      out.push({t: 'path', abs: true, v: path}); continue;
+    }
+    if (c === '@') {
+      i++; const path = [];
+      if (seg.test(src[i] || '')) { let s = ''; while (i < src.length && seg.test(src[i])) s += src[i++]; path.push(s); }
+      out.push({t: 'path', abs: false, v: readSegs(path)}); continue;
+    }
+    if (/[\p{L}_]/u.test(c)) { let s = ''; while (i < src.length && /[\p{L}\p{N}_]/u.test(src[i])) s += src[i++]; out.push({t: 'id', v: s}); continue; }
+    const two = src.slice(i, i + 2);
+    if (['==', '!=', '<=', '>=', '&&', '||', '??'].includes(two)) { out.push({t: 'op', v: two}); i += 2; continue; }
+    if ('+-*/%<>!?:(),'.includes(c)) { out.push({t: 'op', v: c}); i++; continue; }
+    throw new Error(`непонятный символ «${c}»`);
+  }
+  return out;
+}
+function parseExpr(src) {
+  const ts = exprTokens(src);
+  let k = 0;
+  const peek = v => ts[k]?.t === 'op' && ts[k].v === v;
+  const take = v => { if (!peek(v)) throw new Error(`ожидалось «${v}»`); k++; };
+  const BIN = [['??'], ['||'], ['&&'], ['==', '!='], ['<', '<=', '>', '>='], ['+', '-'], ['*', '/', '%']];
+  const ternary = () => {
+    const c = binary(0);
+    if (!peek('?')) return c;
+    k++; const a = ternary(); take(':'); const b = ternary();
+    return {k: '?', c, a, b};
+  };
+  const binary = lv => {
+    if (lv >= BIN.length) return unary();
+    let left = binary(lv + 1);
+    while (ts[k]?.t === 'op' && BIN[lv].includes(ts[k].v)) { const op = ts[k++].v; left = {k: 'bin', op, a: left, b: binary(lv + 1)}; }
+    return left;
+  };
+  const unary = () => {
+    if (peek('!') || peek('-')) { const op = ts[k++].v; return {k: 'un', op, a: unary()}; }
+    return primary();
+  };
+  const primary = () => {
+    const t = ts[k++];
+    if (!t) throw new Error('формула оборвалась');
+    if (t.t === 'num' || t.t === 'str') return {k: 'lit', v: t.v};
+    if (t.t === 'path') return {k: 'path', abs: t.abs, v: t.v};
+    if (t.t === 'op' && t.v === '(') { const e = ternary(); take(')'); return e; }
+    if (t.t === 'id') {
+      if (t.v === 'true' || t.v === 'false') return {k: 'lit', v: t.v === 'true'};
+      if (t.v === 'null') return {k: 'lit', v: null};
+      if (!FN[t.v]) throw new Error(`нет функции «${t.v}»`);
+      take('(');
+      const args = [];
+      if (!peek(')')) { args.push(ternary()); while (peek(',')) { k++; args.push(ternary()); } }
+      take(')');
+      return {k: 'call', f: t.v, args};
+    }
+    throw new Error(`неожиданное «${t.v}»`);
+  };
+  const ast = ternary();
+  if (k < ts.length) throw new Error(`лишнее «${ts[k].v}»`);
+  return ast;
+}
+/** Value of an expression; the data paths it reads are tracked like bindings. */
+function expr(src, scope = '') {
+  let ast = EXPR_CACHE.get(src);
+  if (!ast) {
+    try { ast = parseExpr(String(src)); } catch (e) { throw new Error(`формула «${src}»: ${e.message}`); }
+    if (EXPR_CACHE.size > 1000) EXPR_CACHE.clear();
+    EXPR_CACHE.set(src, ast);
+  }
+  return evalNode(ast, scope);
+}
+function wild(cur, segs) {
+  for (let i = 0; i < segs.length; i++) {
+    if (cur == null) return undefined;
+    if (segs[i] === '*') {
+      const all = Array.isArray(cur) ? cur : typeof cur === 'object' ? Object.values(cur) : [];
+      return all.flatMap(x => { const v = wild(x, segs.slice(i + 1)); return v === undefined ? [] : [v]; });
+    }
+    cur = cur[segs[i]];
+  }
+  return cur;
+}
+function evalNode(n, scope) {
+  switch (n.k) {
+    case 'lit': return n.v;
+    case 'path': {
+      const base = n.abs ? [] : ptr.split(scope || '');
+      const segs = base.concat(n.v), star = segs.indexOf('*');
+      tracking?.add('/' + (star < 0 ? segs : segs.slice(0, star)).map(t => String(t).replace(/~/g, '~0').replace(/\//g, '~1')).join('/'));
+      return wild(G.data, segs);
+    }
+    case 'un': { const a = evalNode(n.a, scope); return n.op === '!' ? !truthy(a) : -toNum(a); }
+    case '?': return truthy(evalNode(n.c, scope)) ? evalNode(n.a, scope) : evalNode(n.b, scope);
+    case 'call': return FN[n.f](...n.args.map(a => evalNode(a, scope)));
+    case 'bin': {
+      if (n.op === '&&') { const a = evalNode(n.a, scope); return truthy(a) ? evalNode(n.b, scope) : a; }
+      if (n.op === '||') { const a = evalNode(n.a, scope); return truthy(a) ? a : evalNode(n.b, scope); }
+      if (n.op === '??') { const a = evalNode(n.a, scope); return a ?? evalNode(n.b, scope); }
+      const a = evalNode(n.a, scope), b = evalNode(n.b, scope);
+      switch (n.op) {
+        case '+':
+          if (Array.isArray(a) && Array.isArray(b)) return a.concat(b);
+          if (typeof a === 'string' || typeof b === 'string') return xtext(a) + xtext(b);
+          return fin(toNum(a) + toNum(b));
+        case '-': return fin(toNum(a) - toNum(b));
+        case '*': return fin(toNum(a) * toNum(b));
+        case '/': return fin(toNum(a) / toNum(b));
+        case '%': return fin(toNum(a) % toNum(b));
+        case '==': return same(a, b);
+        case '!=': return !same(a, b);
+        default: { const c = cmp(a, b); return n.op === '<' ? c < 0 : n.op === '<=' ? c <= 0 : n.op === '>' ? c > 0 : c >= 0; }
+      }
+    }
+  }
+}
+const truthy = v => Array.isArray(v) ? v.length > 0 : v === 'false' ? false : !!v;
+const fin = v => isFinite(v) ? v : null;
+const xtext = v => v == null ? '' : typeof v === 'number' ? fmtNum(v) : typeof v === 'object' ? JSON.stringify(v) : String(v);
+const numeric = v => typeof v === 'number' || (typeof v === 'string' && v.trim() !== '' && isFinite(+v));
+function toNum(v) { if (typeof v === 'number') return v; if (typeof v === 'boolean') return +v; if (v == null || v === '') return 0; return num(v); }
+function same(a, b) {
+  if (a == null || b == null) return a == null && b == null;
+  if (numeric(a) && numeric(b)) return +a === +b;
+  if (typeof a === 'object' || typeof b === 'object') return JSON.stringify(a) === JSON.stringify(b);
+  return String(a) === String(b);
+}
+function cmp(a, b) {
+  if (numeric(a) && numeric(b)) return +a - +b;
+  return String(a ?? '').localeCompare(String(b ?? ''), 'ru', {numeric: true});
+}
+const xlist = (args) => (args.length === 1 && Array.isArray(args[0]) ? args[0] : args.flat()).filter(x => x != null && x !== '');
+const nums = args => xlist(args).map(toNum);
+const FN = {
+  sum: (...a) => nums(a).reduce((x, y) => x + y, 0),
+  avg: (...a) => { const v = nums(a); return v.length ? v.reduce((x, y) => x + y, 0) / v.length : null; },
+  min: (...a) => { const v = nums(a); return v.length ? Math.min(...v) : null; },
+  max: (...a) => { const v = nums(a); return v.length ? Math.max(...v) : null; },
+  len: x => Array.isArray(x) ? x.length : x && typeof x === 'object' ? Object.keys(x).length : xtext(x).length,
+  count: (l, v) => (Array.isArray(l) ? l : []).filter(x => v === undefined ? truthy(x) : same(x, v)).length,
+  round: (x, d = 0) => { const f = 10 ** Math.max(0, Math.min(10, toNum(d))); return Math.round(toNum(x) * f) / f; },
+  abs: x => Math.abs(toNum(x)), floor: x => Math.floor(toNum(x)), ceil: x => Math.ceil(toNum(x)),
+  fmt: (x, d = 2) => x == null || x === '' ? '—' : toNum(x).toLocaleString('ru', {maximumFractionDigits: Math.max(0, Math.min(10, toNum(d)))}),
+  pct: (a, b) => toNum(b) ? Math.round(1000 * toNum(a) / toNum(b)) / 10 : 0,
+  join: (l, sep = ', ') => (Array.isArray(l) ? l : [l]).map(xtext).join(xtext(sep)),
+  where: (l, key, v) => (Array.isArray(l) ? l : []).filter(x => x && typeof x === 'object' && (v === undefined ? truthy(x[key]) : same(x[key], v))),
+  pluck: (l, key) => (Array.isArray(l) ? l : []).map(x => x?.[key]),
+  sort: (l, key) => (Array.isArray(l) ? l.slice() : []).sort((x, y) => key === undefined ? cmp(x, y) : cmp(x?.[key], y?.[key])),
+  first: l => Array.isArray(l) ? l[0] : l, last: l => Array.isArray(l) ? l.at(-1) : l,
+  uniq: l => Array.isArray(l) ? [...new Map(l.map(x => [JSON.stringify(x), x])).values()] : l,
+  contains: (h, x) => Array.isArray(h) ? h.some(y => same(y, x)) : xtext(h).toLowerCase().includes(xtext(x).toLowerCase()),
+  lower: x => xtext(x).toLowerCase(), upper: x => xtext(x).toUpperCase(),
+  if: (c, a, b) => truthy(c) ? a : b,
+  now: () => Date.now(),
+  time: ms => ms == null ? '' : new Date(toNum(ms)).toLocaleTimeString('ru', {hour: '2-digit', minute: '2-digit', second: '2-digit'}),
+  ago: ms => {
+    if (ms == null) return '';
+    const s = Math.max(0, Math.round((Date.now() - toNum(ms)) / 1000));
+    return s < 60 ? `${s} с назад` : s < 3600 ? `${Math.round(s / 60)} мин назад` : s < 86400 ? `${Math.round(s / 3600)} ч назад` : fmtTime(toNum(ms));
+  },
+};
+
 // ── State ────────────────────────────────────────────────────────────────────
 const G = {
   surface: null,            // the surface shown, as the server sent it
@@ -48,6 +240,9 @@ const G = {
   frames: new Set(),        // Html sandboxes to keep in sync
   activity: false,
   step: '',
+  editing: false,           // the person rearranges the interface
+  parentOf: new Map(),      // component id → id of the component that lists it
+  alertOn: new Set(),       // alerts whose condition is true now
 };
 const canvas = el('section'); canvas.id = 'canvas'; canvas.setAttribute('aria-label', 'Интерфейс задачи');
 $('scroll').before(canvas);
@@ -61,7 +256,9 @@ let tracking = null; // the Set of paths the component being rendered reads
 function abs(path, scope) { return path.startsWith('/') ? path : ptr.join(scope || '', path); }
 /** A binding is an object with only a `path` (anything else with a `path` key is data). */
 function pathOf(v, scope) { return v && typeof v === 'object' && !Array.isArray(v) && typeof v.path === 'string' && Object.keys(v).length === 1 ? abs(v.path, scope) : null; }
+const isExpr = v => v && typeof v === 'object' && !Array.isArray(v) && typeof v.expr === 'string' && Object.keys(v).length === 1;
 function val(v, scope) {
+  if (isExpr(v)) return expr(v.expr, scope);
   const p = pathOf(v, scope);
   if (p == null) return v;
   tracking?.add(p);
@@ -69,7 +266,7 @@ function val(v, scope) {
 }
 /** Resolve bindings inside an action context. */
 function resolve(v, scope) {
-  if (pathOf(v, scope) != null) return val(v, scope);
+  if (pathOf(v, scope) != null || isExpr(v)) return val(v, scope);
   if (Array.isArray(v)) return v.map(x => resolve(x, scope));
   if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, resolve(x, scope)]));
   return v;
@@ -79,12 +276,18 @@ const arr = (v, scope) => { const x = val(v, scope); return Array.isArray(x) ? x
 
 /** The person changed a value: update the model, re-render what reads it, save soon. */
 function setData(path, value, src) {
-  G.data = ptr.set(G.data, path, value) ?? {};
+  if (JSON.stringify(ptr.get(G.data, path)) === JSON.stringify(value)) return; // nothing changed: no version
   G.pending = G.pending.filter(p => !(p.path + '/').startsWith(path + '/'));
   G.pending.push({path, value: value === undefined ? null : value});
   saveSoon();
+  applyData(path, value, src);
+}
+/** A new value in the model (from the person or a live source): re-render what reads it. */
+function applyData(path, value, src) {
+  G.data = ptr.set(G.data, path, value) ?? {};
   refresh(path, src);
   for (const f of G.frames) f.contentWindow?.postMessage({kron: 'data', data: G.data}, '*');
+  checkAlerts();
 }
 const saveSoon = debounce(() => saveData(), 500);
 async function saveData() {
@@ -115,13 +318,14 @@ function renderComp(id, scope = '') {
   const outer = tracking; tracking = rec.deps;
   let node;
   try {
-    const f = COMPONENTS[c.component];
-    node = f ? f(c, scope, rec) : unknown(c);
+    if (c.visible !== undefined && !truthy(val(c.visible, scope))) { node = el('div'); node.hidden = true; }
+    else { const f = COMPONENTS[c.component]; node = f ? f(c, scope, rec) : unknown(c); }
   } catch (e) {
     console.error('render', id, e);
     node = el('div', 'g-broken', icon('circle-alert', 'sm') + `<span>Не удалось показать «${esc(c.component)}»: ${esc(e.message)}</span>`);
   } finally { tracking = outer; }
   node.dataset.gid = id;
+  if (G.editing && !scope && G.parentOf.has(id)) node = editFrame(c, node);
   rec.el = node;
   G.records.push(rec);
   return node;
@@ -157,23 +361,47 @@ function uiState(c, scope, init) {
 
 /** Show a surface. `draft`: a remembered layout while the agent builds the real one. */
 function showSurface(s, {draft = false} = {}) {
+  const same = G.surface?.id && G.surface.id === s.id;
   G.surface = s; G.draft = draft;
   G.data = structuredClone(s.data || {});
   for (const p of G.pending) ptr.set(G.data, p.path, p.value ?? undefined);
   G.byId = new Map((s.components || []).map(c => [c.id, c]));
+  G.parentOf = new Map();
+  for (const c of s.components || []) {
+    for (const list of [c.children, ...(Array.isArray(c.tabs) ? c.tabs.map(t => t.children) : [])]) {
+      if (Array.isArray(list)) for (const k of list) if (typeof k === 'string') G.parentOf.set(k, c.id);
+    }
+  }
+  if (!same) { G.alertOn.clear(); G.alertsSeen = false; G.editing = false; }
+  draw();
+  if (!draft) setTitle(s.title);
+  genBar();
+  startLive(same);
+}
+/** Draw the current surface from the live model (keeps live values and the person's edits). */
+function draw() {
+  const s = G.surface;
   G.records = []; G.frames.clear();
   document.body.classList.add('surface');
+  document.body.classList.toggle('g-editing', G.editing);
+  const y = canvas.scrollTop;
   canvas.innerHTML = '';
-  canvas.classList.toggle('draft', draft);
-  if (draft) canvas.append(el('div', 'g-draftnote', icon('history', 'sm') + '<span>Ваш привычный вид для таких задач. Обновляю данные…</span>'));
+  canvas.classList.toggle('draft', G.draft);
+  if (G.draft) canvas.append(el('div', 'g-draftnote', icon('history', 'sm') + '<span>Ваш привычный вид для таких задач. Обновляю данные…</span>'));
+  canvas.append(liveBox, alertBox);
+  if (G.editing) {
+    const note = el('div', 'g-editnote', icon('pencil', 'sm') + '<span>Двигайте и скрывайте блоки или нажмите «Изменить», чтобы сказать агенту, что сделать с блоком.</span>');
+    note.append(btn('btn sm primary', 'Готово', () => setEditing(false)));
+    canvas.append(note);
+  }
   const root = el('div', 'g-root');
   try {
     if (!G.byId.has(s.root)) throw new Error('нет корневого компонента');
     root.append(renderComp(s.root));
   } catch (e) { return fallbackToText(e); }
   canvas.append(root);
-  if (!draft) setTitle(s.title);
-  genBar();
+  checkAlerts();
+  canvas.scrollTop = y;
 }
 function fallbackToText(e) {
   canvas.innerHTML = '';
@@ -184,8 +412,10 @@ function fallbackToText(e) {
   setActivity(true);
 }
 function closeSurface() {
-  flushSignals(); saveData();
-  G.surface = null; G.draft = false; G.records = []; G.frames.clear(); G.ui.clear();
+  flushSignals(); saveData(); stopLive();
+  G.surface = null; G.draft = false; G.records = []; G.frames.clear(); G.ui.clear(); G.editing = false;
+  G.alertOn.clear();
+  document.body.classList.remove('g-editing');
   canvas.innerHTML = '';
   document.body.classList.remove('surface');
   setActivity(false);
@@ -799,6 +1029,7 @@ async function runAction(action, scope, extra, comp, button) {
     if (call === 'toggle' && typeof args.path === 'string') { const p = abs(args.path, scope); return setData(p, !ptr.get(G.data, p)); }
     if (call === 'openUrl' && /^https?:\/\//.test(a.url || '')) return window.open(a.url, '_blank', 'noopener');
     if (call === 'copy') return copy(String(a.text ?? ''), button);
+    if (call === 'refresh') return refreshLive(a.source ? String(a.source) : null);
     return toast('Неизвестное действие: ' + call, {err: true});
   }
   if (action.tool) return runTool(action.tool, scope, {danger: comp?.variant === 'danger', label: str(comp?.label), button});
@@ -852,6 +1083,153 @@ function sendAction(a) {
   send('[ui-action] ' + JSON.stringify(a));
 }
 
+// ── Live data: sources the hub runs while the interface is open ─────────────
+const L = {timers: [], paused: false, busy: new Set(), need: [], declined: false, last: new Map(), errors: new Map(), seen: new Map()};
+const liveBox = el('div', 'g-livebox'); liveBox.hidden = true;
+function stopLive() { L.timers.forEach(clearInterval); L.timers = []; }
+/** (Re)start the timers. After the agent changed the surface, only new or changed sources run at once. */
+function startLive(same) {
+  stopLive();
+  const list = G.surface?.id && !G.draft ? G.surface.sources || [] : [];
+  if (!same) { L.need = []; L.declined = false; L.last.clear(); L.errors.clear(); L.seen.clear(); }
+  for (const src of list) {
+    const key = JSON.stringify(src);
+    if (L.seen.get(src.id) !== key) { L.seen.set(src.id, key); runSource(src); }
+    if (src.every > 0) L.timers.push(setInterval(() => { if (!L.paused && !document.hidden) runSource(src); }, src.every * 1000));
+  }
+  liveUI();
+}
+async function runSource(src) {
+  const id = G.surface?.id;
+  if (!id || L.busy.has(src.id) || L.need.includes(src.id)) return;
+  L.busy.add(src.id);
+  try {
+    const r = await postJSON(`/api/surfaces/${id}/live`, {source: src.id, tz: new Date().getTimezoneOffset()});
+    if (G.surface?.id !== id) return;
+    if (r.ok) { applyData(r.path, r.value); L.last.set(src.id, Date.now()); L.errors.delete(src.id); }
+    else L.errors.set(src.id, r.error);
+  } catch (e) {
+    if (G.surface?.id !== id) return;
+    if (/needs approval/.test(e.message)) { if (!L.need.includes(src.id)) L.need.push(src.id); }
+    else L.errors.set(src.id, /read-only/.test(e.message) ? 'режим «Только чтение»: команды не запускаются' : e.message);
+  } finally { L.busy.delete(src.id); liveUI(); }
+}
+/** Run one source (or all) now. */
+function refreshLive(id) {
+  const list = (G.surface?.sources || []).filter(x => !id || x.id === id);
+  if (!list.length) return toast('Нечего обновлять');
+  list.forEach(runSource);
+}
+async function approveLive() {
+  const ids = L.need.slice();
+  try { await postJSON(`/api/surfaces/${G.surface.id}/approve`, {sources: ids}); } catch (e) { return fail(e); }
+  L.need = [];
+  (G.surface.sources || []).filter(x => ids.includes(x.id)).forEach(runSource);
+}
+const srcWhat = src => src.tool?.name === 'shell' ? String(src.tool.args?.command || '') : `${toolName(src.tool?.name)}: ${toolArg(src.tool?.name, src.tool?.args || {})}`;
+const every = n => !n ? 'при открытии' : n < 60 ? `каждые ${n} с` : n < 3600 ? `каждые ${Math.round(n / 60)} мин` : `каждые ${Math.round(n / 3600)} ч`;
+function liveUI() {
+  liveBox.innerHTML = '';
+  const need = L.declined ? [] : (G.surface?.sources || []).filter(x => L.need.includes(x.id));
+  liveBox.hidden = !need.length;
+  if (need.length) {
+    liveBox.append(el('div', 'g-livehead', icon('activity', 'sm') + `<b>Интерфейс может обновляться сам</b>`),
+      el('p', '', `Разрешите ${need.length > 1 ? 'эти команды' : 'эту команду'} на машине «${esc(S.node || 'хаб')}». Они только читают данные; изменится команда — kron спросит снова.`));
+    const ul = el('ul');
+    for (const x of need) ul.append(el('li', '', `<code>${esc(srcWhat(x))}</code><small>${esc(every(x.every))}</small>`));
+    const row = el('div', 'row-end');
+    row.append(btn('btn sm', 'Не сейчас', () => { L.declined = true; liveUI(); }), btn('btn sm primary', icon('check', 'sm') + 'Разрешить', () => approveLive()));
+    liveBox.append(ul, row);
+  }
+  genBar();
+}
+function liveMenu() {
+  const items = (G.surface?.sources || []).map(x => {
+    const err = L.errors.get(x.id), t = L.last.get(x.id);
+    return {icon: err ? 'circle-x' : L.need.includes(x.id) ? 'shield-alert' : 'circle-check',
+      label: x.label || srcWhat(x).slice(0, 70),
+      sub: err ? 'ошибка: ' + err.slice(0, 120) : L.need.includes(x.id) ? 'ждёт разрешения' : `${every(x.every)}${t ? ' · обновлено ' + new Date(t).toLocaleTimeString('ru') : ''}`,
+      onClick: () => { if (L.need.includes(x.id)) { L.declined = false; liveUI(); } else runSource(x); }};
+  });
+  items.push({sep: true},
+    {icon: 'refresh-cw', label: 'Обновить всё сейчас', onClick: () => { L.declined = false; liveUI(); refreshLive(); }},
+    {icon: L.paused ? 'play' : 'pause', label: L.paused ? 'Продолжить обновление' : 'Пауза', onClick: () => { L.paused = !L.paused; genBar(); if (!L.paused) refreshLive(); }});
+  if ((G.surface?.alerts || []).length && 'Notification' in window && Notification.permission === 'default') {
+    items.push({icon: 'bell', label: 'Уведомлять об оповещениях', sub: 'Когда интерфейс не на экране', onClick: () => Notification.requestPermission()});
+  }
+  return items;
+}
+
+// ── Alerts: conditions the person wants to know about ───────────────────────
+const alertBox = el('div', 'g-alerts'); alertBox.setAttribute('role', 'status');
+function checkAlerts() {
+  const list = G.surface && !G.draft ? G.surface.alerts || [] : [];
+  const on = [];
+  for (const a of list) {
+    let hit = false, msg = '';
+    try { hit = truthy(expr(a.when)); msg = hit ? str(a.text) || a.when : ''; } catch (e) { console.warn('alert', a.id, e.message); }
+    if (hit) on.push({...a, msg});
+    if (hit && !G.alertOn.has(a.id) && G.alertsSeen) notifyAlert(a, msg);
+    if (hit) G.alertOn.add(a.id); else G.alertOn.delete(a.id);
+  }
+  G.alertsSeen = true;
+  alertBox.innerHTML = '';
+  for (const a of on) {
+    const t = a.tone === 'danger' ? 'err' : a.tone === 'info' || a.tone === 'ok' ? a.tone : 'warn';
+    alertBox.append(el('div', 'g-alert ' + t, icon(t === 'err' ? 'circle-alert' : t === 'ok' ? 'circle-check' : 'bell', 'sm') + `<span>${esc(a.msg)}</span>`));
+  }
+  alertBox.hidden = !on.length;
+}
+function notifyAlert(a, msg) {
+  const title = G.surface?.title || 'kron';
+  navigator.vibrate?.(200);
+  if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+    try { new Notification(title, {body: msg, tag: 'kron-' + G.surface.id + '-' + a.id, icon: '/icon-192.png'}); } catch {}
+  } else if (!document.hidden) toast(msg, {ic: 'bell', err: a.tone === 'danger'});
+}
+
+// ── Editing: the person rearranges the interface or points at a part ───────
+function editFrame(c, node) {
+  const box = el('div', 'g-editbox');
+  const bar = el('div', 'g-edittools');
+  const name = c.title || c.label || c.text;
+  bar.append(el('span', 'g-editname', esc(COMP_NAMES[c.component] || c.component) + (typeof name === 'string' ? ' · ' + esc(name.slice(0, 30)) : '')));
+  bar.append(
+    btn('icon-btn sm', icon('arrow-up', 'xs'), () => layout('move', c.id, -1), 'Выше'),
+    btn('icon-btn sm', icon('arrow-down', 'xs'), () => layout('move', c.id, 1), 'Ниже'),
+    btn('icon-btn sm', icon('eye-off', 'sm'), () => layout('hide', c.id), 'Скрыть'),
+    btn('btn sm', icon('sparkles', 'xs') + 'Изменить', () => askEdit(c), 'Сказать агенту, что сделать с этим блоком'));
+  box.append(bar, node);
+  box.dataset.gid = c.id;
+  return box;
+}
+const COMP_NAMES = {Column: 'Колонка', Row: 'Ряд', Grid: 'Сетка', Card: 'Карточка', Tabs: 'Вкладки', Collapsible: 'Раскрывающийся блок', Divider: 'Разделитель',
+  Heading: 'Заголовок', Text: 'Текст', Badge: 'Метка', Metric: 'Показатель', Progress: 'Прогресс', KeyValue: 'Свойства', Code: 'Код', Diff: 'Изменения', Log: 'Журнал',
+  Image: 'Картинка', Table: 'Таблица', Chart: 'График', List: 'Список', Tree: 'Дерево', TextField: 'Поле', Select: 'Выбор', ChoicePicker: 'Варианты', CheckBox: 'Переключатель',
+  Slider: 'Ползунок', Editor: 'Редактор', Button: 'Кнопка', Terminal: 'Терминал', Html: 'Свой блок'};
+function setEditing(v) {
+  G.editing = v;
+  if (G.surface) draw();
+  genBar();
+}
+async function layout(op, id, dir = 1) {
+  await saveData();
+  try {
+    const s = await postJSON(`/api/surfaces/${G.surface.id}/layout`, {op, id, dir});
+    showSurface(s);
+    if (op === 'hide') toast('Блок скрыт', {ic: 'eye-off', action: 'Вернуть', onAction: () => undo()});
+  } catch (e) { fail(e); }
+}
+async function askEdit(c) {
+  if (S.busy) return toast('Агент ещё работает. Дождитесь или остановите его.');
+  const what = COMP_NAMES[c.component] || c.component;
+  const request = await dialog({title: `Что изменить: ${what.toLowerCase()}?`, input: true, placeholder: 'Например: покажи как график по дням, добавь колонку «цена»', ok: 'Изменить'});
+  if (!request?.trim()) return;
+  setEditing(false);
+  saveData();
+  send('[ui-edit] ' + JSON.stringify({component: c.id, type: c.component, request: request.trim()}));
+}
+
 // ── Header: activity, undo, versions, feedback ───────────────────────────────
 const bar = el('div', 'g-bar'); bar.id = 'genBar';
 $('filesBtn').before(bar);
@@ -867,7 +1245,20 @@ function genBar() {
   undoBtn.disabled = !G.surface.id || (G.surface.version || 0) < 2;
   const more = btn('icon-btn', icon('ellipsis'), () => menu(more, surfaceMenu), 'Интерфейс');
   more.setAttribute('aria-haspopup', 'menu');
-  bar.append(undoBtn, act, more);
+  bar.append(undoBtn);
+  if ((G.surface.sources || []).length && G.surface.id) {
+    const bad = L.errors.size || L.need.length;
+    const live = btn('icon-btn g-live' + (L.paused ? ' paused' : bad ? ' bad' : ' on'), icon(L.paused ? 'pause' : 'activity'), () => menu(live, liveMenu, {width: 340}),
+      L.paused ? 'Живые данные на паузе' : bad ? 'Живые данные: есть проблемы' : 'Живые данные обновляются');
+    live.setAttribute('aria-haspopup', 'menu');
+    bar.append(live);
+  }
+  if (G.surface.id) {
+    const ed = btn('icon-btn g-edit' + (G.editing ? ' on' : ''), icon('pencil'), () => setEditing(!G.editing), G.editing ? 'Закончить настройку' : 'Настроить интерфейс: двигать, скрывать, изменить блок');
+    ed.setAttribute('aria-pressed', G.editing);
+    bar.append(ed);
+  }
+  bar.append(act, more);
 }
 function surfaceMenu() {
   const s = G.surface;
@@ -875,6 +1266,7 @@ function surfaceMenu() {
     {icon: 'thumbs-up', label: 'Удобно, запомнить этот вид', sub: 'Похожие задачи будут строиться так же', onClick: () => feedback('like')},
     {icon: 'thumbs-down', label: 'Не то — сделать по-другому', sub: 'Агент перестроит интерфейс', onClick: () => feedback('dislike')},
     {sep: true},
+    {icon: 'pencil', label: G.editing ? 'Закончить настройку' : 'Настроить интерфейс', sub: 'Двигать и скрывать блоки, сказать агенту, что изменить', onClick: () => setEditing(!G.editing)},
     {icon: s.pinned ? 'x' : 'pin', label: s.pinned ? 'Убрать с главного экрана' : 'Закрепить на главном экране', onClick: () => pin(!s.pinned)},
     {icon: 'history', label: 'История версий…', onClick: () => versions()},
     {icon: 'message-square', label: G.activity ? 'Скрыть переписку и шаги' : 'Показать переписку и шаги', onClick: () => setActivity(!G.activity)},
@@ -932,7 +1324,12 @@ async function removeSurface() {
   if (!await dialog({title: 'Удалить интерфейс?', text: `«${s.title}» и его версии будут удалены. Переписка с агентом останется.`, ok: 'Удалить', danger: true})) return;
   try { await api('/api/surfaces/' + s.id, {method: 'DELETE'}); closeSurface(); setActivity(false); toast('Интерфейс удалён'); renderHome(); } catch (e) { fail(e); }
 }
+document.addEventListener('visibilitychange', () => {
+  // Back on screen: catch up with what changed meanwhile.
+  if (!document.hidden && G.surface?.id && !L.paused) (G.surface.sources || []).filter(x => x.every > 0).forEach(runSource);
+});
 document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && G.editing && !document.querySelector('.dialog, .menu')) { setEditing(false); return; }
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z' && G.surface?.id && !S.busy &&
     !/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName)) { e.preventDefault(); undo(); }
 });
@@ -972,8 +1369,9 @@ const GEN = {
         if (!e.draft) { loadThreads().catch(() => {}); if (isMobile()) setActivity(false); }
         break;
       case 'tool_start':
-        if (!e.parent && !['render_ui', 'update_data', 'remember'].includes(e.name)) setStatus(`${toolName(e.name)} · ${toolArg(e.name, parseArgs(e.args)).split('\n')[0].slice(0, 90)}`);
+        if (!e.parent && !['render_ui', 'patch_ui', 'update_data', 'remember'].includes(e.name)) setStatus(`${toolName(e.name)} · ${toolArg(e.name, parseArgs(e.args)).split('\n')[0].slice(0, 90)}`);
         else if (e.name === 'render_ui') setStatus('Собираю интерфейс…');
+        else if (e.name === 'patch_ui') setStatus('Меняю интерфейс…');
         else if (e.name === 'update_data') setStatus('Обновляю данные…');
         break;
       case 'text': if (!G.step) setStatus('Отвечает…'); break;
@@ -991,6 +1389,7 @@ const GEN = {
   stopped() { setStatus(''); genBar(); },
 };
 TOOLS.render_ui = ['sparkles', 'Интерфейс'];
+TOOLS.patch_ui = ['pencil', 'Правка интерфейса'];
 TOOLS.update_data = ['refresh-cw', 'Данные интерфейса'];
 TOOLS.remember = ['brain', 'Запомнить'];
 

@@ -156,6 +156,9 @@ pub async fn serve(cfg: Arc<Config>, workdir: std::path::PathBuf) -> Result<()> 
         .route("/api/surfaces/:id/versions", get(surface_versions))
         .route("/api/surfaces/:id/signal", post(surface_signal))
         .route("/api/surfaces/:id/exec", post(surface_exec))
+        .route("/api/surfaces/:id/live", post(surface_live))
+        .route("/api/surfaces/:id/approve", post(surface_approve))
+        .route("/api/surfaces/:id/layout", post(surface_layout))
         .route("/api/genui/profile", get(genui_profile))
         .route("/api/genui/match", get(genui_match))
         .route("/api/genui/notes", post(genui_note_add))
@@ -920,13 +923,8 @@ async fn surface_exec(
         return err(format!("'{tool}' cannot run from an interface"));
     }
     let settings = hub.store.meta(&s.thread)["settings"].clone();
-    let access = crate::agent::Access::parse(settings["access"].as_str().unwrap_or("ask"));
-    let changes = crate::tools::changes_things(tool, &args);
-    if changes && access == crate::agent::Access::ReadOnly {
-        return (StatusCode::FORBIDDEN, "read-only: this interface cannot run commands").into_response();
-    }
-    if changes && access != crate::agent::Access::Full && body["confirmed"] != true {
-        return (StatusCode::CONFLICT, "needs confirmation").into_response();
+    if let Some(r) = ui_refusal(&settings, tool, &args, body["confirmed"] == true, "needs confirmation") {
+        return r;
     }
     let exec = match hub.executor(settings["node"].as_str(), settings["cwd"].as_str(), false).await {
         Ok(e) => e,
@@ -943,6 +941,101 @@ async fn surface_exec(
         })
         .ok();
     Json(json!({"output": output, "ok": ok})).into_response()
+}
+
+/// Why a tool may not run from an interface of a thread with these settings,
+/// if it may not: read-only threads only look; outside "full" access, anything
+/// that changes things needs the person's consent (`allowed`).
+fn ui_refusal(settings: &Value, tool: &str, args: &Value, allowed: bool, ask: &'static str) -> Option<Response> {
+    let access = crate::agent::Access::parse(settings["access"].as_str().unwrap_or("ask"));
+    let changes = crate::tools::changes_things(tool, args);
+    if changes && access == crate::agent::Access::ReadOnly {
+        return Some((StatusCode::FORBIDDEN, "read-only: this interface cannot run commands").into_response());
+    }
+    if changes && access != crate::agent::Access::Full && !allowed {
+        return Some((StatusCode::CONFLICT, ask).into_response());
+    }
+    None
+}
+
+/// Run one live source of an interface and put its result into the data:
+/// {source, tz} (tz: the browser's offset from UTC in minutes, for time labels).
+/// A shell source runs only once the person approved its command (409 "needs approval").
+async fn surface_live(
+    State(hub): State<Shared>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    Json(body): Json<Value>,
+) -> Response {
+    guard!(hub, headers, q);
+    let cfg = hub.cfg();
+    let surfaces = crate::genui::surfaces(&cfg);
+    let s = match surfaces.get(&id) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    };
+    let Some(src) = s.sources.iter().find(|x| x["id"] == body["source"]).cloned() else {
+        return (StatusCode::NOT_FOUND, "no such source").into_response();
+    };
+    let tool = src["tool"]["name"].as_str().unwrap_or("");
+    let args = &src["tool"]["args"];
+    let settings = hub.store.meta(&s.thread)["settings"].clone();
+    let approved = s.approved.contains(&crate::genui::surface::source_key(&src));
+    if let Some(r) = ui_refusal(&settings, tool, args, approved, "needs approval") {
+        return r;
+    }
+    let exec = match hub.executor(settings["node"].as_str(), settings["cwd"].as_str(), false).await {
+        Ok(e) => e,
+        Err(e) => return err(format!("{e:#}")),
+    };
+    let output = exec.run_tool(tool, args).await;
+    let parsed = crate::genui::surface::parse_output(tool, src["parse"].as_str().unwrap_or("text"), &output);
+    let value = parsed.and_then(|v| surfaces.write_live(&id, &src, v, &clock(body["tz"].as_i64().unwrap_or(0))));
+    match value {
+        Ok(v) => Json(json!({"ok": true, "path": src["target"], "value": v})).into_response(),
+        Err(e) => Json(json!({"ok": false, "error": format!("{e:#}")})).into_response(),
+    }
+}
+
+/// "HH:MM:SS" now, at `tz` minutes behind UTC (as JavaScript's getTimezoneOffset).
+fn clock(tz: i64) -> String {
+    let secs = (crate::types::now_ms() / 1000 - tz.clamp(-1440, 1440) * 60).rem_euclid(86_400);
+    format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+}
+
+/// The person allows these live sources to run their commands: {sources: [ids]}.
+async fn surface_approve(
+    State(hub): State<Shared>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    Json(body): Json<Value>,
+) -> Response {
+    guard!(hub, headers, q);
+    let ids: Vec<String> =
+        body["sources"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect();
+    match crate::genui::surfaces(&hub.cfg()).approve(&id, &ids) {
+        Ok(s) => Json(json!({"approved": s.approved.len()})).into_response(),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// The person rearranges the interface: {op: "move" | "hide", id, dir: -1 | 1}.
+async fn surface_layout(
+    State(hub): State<Shared>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    Json(body): Json<Value>,
+) -> Response {
+    guard!(hub, headers, q);
+    let op = body["op"].as_str().unwrap_or("");
+    let target = body["id"].as_str().unwrap_or("");
+    match crate::genui::surfaces(&hub.cfg()).layout(&id, op, target, body["dir"].as_i64().unwrap_or(1)) {
+        Ok(s) => Json(s.to_client()).into_response(),
+        Err(e) => err(format!("{e:#}")),
+    }
 }
 
 async fn genui_profile(State(hub): State<Shared>, headers: HeaderMap, Query(q): Query<TokenQuery>) -> Response {

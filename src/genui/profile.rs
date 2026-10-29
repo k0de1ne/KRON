@@ -327,6 +327,9 @@ pub struct Template {
     pub root: String,
     pub components: Vec<Value>,
     pub data: Value,
+    /// Live sources and alerts of the surface it came from.
+    pub sources: Vec<Value>,
+    pub alerts: Vec<Value>,
     pub source: String,
     pub score: f32,
     pub uses: u64,
@@ -506,6 +509,8 @@ impl Memory {
         t.root = s.root.clone();
         t.components = s.components.clone();
         t.data = s.data.clone();
+        t.sources = s.sources.clone();
+        t.alerts = s.alerts.clone();
         t.source = s.id.clone();
         t.score = score;
         t.updated = now_ms();
