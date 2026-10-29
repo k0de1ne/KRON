@@ -84,13 +84,6 @@ pub enum Event {
         id: String,
         answer: String,
     },
-    /// The interface for the task (generative UI): the whole surface after a change.
-    /// `draft`: a remembered layout shown while the agent builds the real one.
-    Surface {
-        surface: serde_json::Value,
-        #[serde(default)]
-        draft: bool,
-    },
     Error {
         message: String,
     },

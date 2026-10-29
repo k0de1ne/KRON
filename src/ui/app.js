@@ -63,7 +63,7 @@ const S = {
   thread: null, title: '', threads: [], query: '',
   run: null, busy: false, runStart: 0, follower: null,
   pick: storeJSON('pick'),                 // {kind: provider | agent | site, name}
-  mode: store('mode') || 'ui',             // ui (interface for the task) | agent | chat
+  mode: store('mode') === 'chat' ? 'chat' : 'agent', // agent | chat
   node: store('node'),
   cwds: storeJSON('cwds') || {},           // node -> working folder
   access: store('access') || 'ask',       // full | ask | read
@@ -76,7 +76,7 @@ const S = {
   nodeInfo() { return this.info?.nodes.find(n => n.name === this.node) || null; },
   cwd() { return this.cwds[this.node] || ''; },
 };
-if (params.has('token')) { store('token', S.token); history.replaceState(null, '', '/'); }
+if (params.has('token')) { store('token', S.token); history.replaceState(null, '', location.pathname); }
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 
 // ── API ──────────────────────────────────────────────────────────────────────
@@ -855,8 +855,7 @@ function render(records, upto) {
 // ── Opening threads ──────────────────────────────────────────────────────────
 function setPlaceholder() {
   if (S.ask) return;
-  $('text').placeholder = S.mode !== 'ui' || S.pick?.kind === 'site' ? 'Напишите сообщение…'
-    : S.thread ? 'Уточните задачу или что изменить…' : 'Опишите задачу — kron соберёт под неё интерфейс';
+  $('text').placeholder = 'Напишите сообщение…';
 }
 function setTitle(t) {
   S.title = t || '';
@@ -883,8 +882,6 @@ async function openThread(name, {keepDraft} = {}) {
     if (meta.title) setTitle(meta.title);
     else if (!t) { const u = records.find(r => r.role === 'user'); setTitle(u ? u.content.slice(0, 80) : ''); }
     restoreSettings(meta.settings);
-    await window.GEN?.open(meta.surface || null);
-    if (S.thread !== name) return;
     if (active.run) { render(records, active.base); follow(active.run); }
     else {
       render(records);
@@ -892,7 +889,6 @@ async function openThread(name, {keepDraft} = {}) {
     }
   } else {
     restoreSettings(null);
-    window.GEN?.close();
   }
   if (!keepDraft) loadDraft();
   renderThreads(); refreshControls();
@@ -902,7 +898,7 @@ function restoreSettings(s) {
   if (!s) return;
   const pick = s.site ? {kind: 'site', name: s.site} : s.agent ? {kind: 'agent', name: s.agent} : s.provider ? {kind: 'provider', name: s.provider} : null;
   if (pick && validPick(pick)) S.pick = pick;
-  if (s.mode === 'chat' || s.mode === 'agent' || s.mode === 'ui') S.mode = s.mode;
+  if (s.mode === 'chat' || s.mode === 'agent') S.mode = s.mode;
   if (s.node && S.info?.nodes.some(n => n.name === s.node)) S.node = s.node;
   if (s.node && s.cwd != null) S.cwds[s.node] = s.cwd || '';
   if (s.access) S.access = s.access;
@@ -987,7 +983,6 @@ const ACCESS = {
 /** Chip text with a shorter variant for phones. */
 const label2 = (long, short) => short && short !== long ? `<span class="long">${long}</span><span class="short">${short}</span>` : long;
 const MODES = {
-  ui: ['layout-dashboard', 'Интерфейс', 'Агент соберёт рабочий интерфейс под задачу'],
   agent: ['wrench', 'Агент', 'Агент с инструментами, ответ в переписке'],
   chat: ['message-square', 'Чат', 'Обычный разговор без инструментов'],
 };
@@ -1001,8 +996,7 @@ function refreshControls() {
     S.pick = first ? {kind: 'provider', name: first.name} : null;
   }
   const p = S.pick, web = p?.kind === 'site', agentPreset = p?.kind === 'agent';
-  const uiMode = !web && S.mode === 'ui';
-  const agentMode = !web && (agentPreset || S.mode === 'agent' || uiMode);
+  const agentMode = !web && (agentPreset || S.mode === 'agent');
   const nodes = nodesFor();
   if (!nodes.some(n => n.name === S.node)) S.node = nodes[0]?.name || null;
 
@@ -1017,13 +1011,13 @@ function refreshControls() {
   // Composer chips.
   const chips = $('chips'); chips.innerHTML = '';
   if (!web) {
-    const [ic, label] = MODES[uiMode ? 'ui' : agentMode ? 'agent' : 'chat'];
+    const [ic, label] = MODES[agentMode ? 'agent' : 'chat'];
     const c = btn('chip on', icon(ic, 'sm') + `<span class="t">${label}</span>` + icon('chevron-down', 'xs'),
       () => menu(c, () => Object.entries(MODES).map(([k, [mic, ml, sub]]) => ({
-        icon: mic, label: ml, sub, on: (uiMode ? 'ui' : agentMode ? 'agent' : 'chat') === k,
+        icon: mic, label: ml, sub, on: (agentMode ? 'agent' : 'chat') === k,
         onClick: () => { S.mode = k; store('mode', k); refreshControls(); },
       })), {place: 'above', width: 300}),
-      'Как kron отвечает: интерфейсом, агентом в переписке или обычным чатом');
+      'Как kron отвечает: агентом с инструментами или обычным чатом');
     c.setAttribute('aria-haspopup', 'menu');
     chips.append(c);
   }
@@ -1050,7 +1044,6 @@ function refreshControls() {
   const ctx = $('emptyCtx');
   const bits = [];
   if (web) bits.push(icon('globe', 'sm') + 'Вопрос уйдёт в обычный веб-чат ' + esc(SITE_NAME[p.name] || p.name));
-  else if (uiMode) bits.push(icon('layout-dashboard', 'sm') + 'Интерфейс под задачу · агент на машине <b>' + esc(S.node || '—') + '</b>' + (S.cwd() ? ' в ' + esc(shortPath(S.cwd())) : ''));
   else if (agentMode) bits.push(icon('wrench', 'sm') + 'Агент на машине <b>' + esc(S.node || '—') + '</b>' + (S.cwd() ? ' в ' + esc(shortPath(S.cwd())) : ''));
   else bits.push(icon('message-square', 'sm') + 'Обычный чат, без инструментов');
   ctx.innerHTML = `<span class="ctx-line">${bits.join(' ')}</span>`;
@@ -1060,9 +1053,9 @@ function refreshControls() {
     w.append(btn('btn sm primary', noKey ? 'Ввести ключ' : 'Войти', () => openSettings(noKey ? 'api' : 'accounts')), btn('btn sm', 'Выбрать модель', () => $('modelBtn').click()));
     ctx.append(w);
   }
-  $('greet').textContent = uiMode ? 'Что сделаем?' : 'Чем могу помочь?';
+  $('greet').textContent = 'Чем могу помочь?';
   setPlaceholder();
-  if (uiMode) window.renderHome?.(); else { $('sugg').className = 'sugg'; renderSuggestions(web ? 'chat' : agentMode ? 'agent' : 'chat'); }
+  $('sugg').className = 'sugg'; renderSuggestions(web ? 'chat' : agentMode ? 'agent' : 'chat');
   $('filesBtn').hidden = !S.node;
   grow();
 }
@@ -1231,7 +1224,7 @@ async function send(textOverride) {
   if (S.busy) return;
   const p = S.pick, web = p.kind === 'site';
   if (needsLogin(p)) { { const nk = provider(p.name)?.key_missing; toast(nk ? 'Сначала введите ключ API' : 'Сначала войдите в подписку или выберите другую модель', {action: nk ? 'Ввести ключ' : 'Войти', onAction: () => openSettings(nk ? 'api' : 'accounts')}); } return; }
-  const mode = web ? 'web' : S.mode === 'ui' ? 'ui' : (p.kind === 'agent' || S.mode === 'agent') ? 'agent' : 'chat';
+  const mode = web ? 'web' : (p.kind === 'agent' || S.mode === 'agent') ? 'agent' : 'chat';
   if (textOverride == null) { text.value = ''; delete drafts[S.thread || '_new']; storeJSON('drafts', drafts); }
   setBusy(true);
   try { t = (t + await attachmentsText(mode)).trim(); } catch (e) { fail(e); }
@@ -1241,7 +1234,7 @@ async function send(textOverride) {
   if (p.kind === 'agent') body.agent = p.name;
   if (web) body.site = p.name;
   if (mode !== 'chat') body.node = S.node;
-  if (mode === 'agent' || mode === 'ui') { body.access = S.access; if (S.cwd()) body.cwd = S.cwd(); }
+  if (mode === 'agent') { body.access = S.access; if (S.cwd()) body.cwd = S.cwd(); }
   if (mode !== 'web' && S.effort && effortCapable()) body.effort = S.effort;
   addUser(t); stick = true; toBottom(true);
   try {
@@ -1266,7 +1259,6 @@ async function answer(q, value) {
 async function follow(runId, {retry} = {}) {
   S.run = runId; setBusy(true);
   const thread = S.thread;
-  window.GEN?.started();
   const ctl = new AbortController(); S.follower = ctl;
   const turn = new Turn({live: true});
   turn.retry = retry;
@@ -1286,7 +1278,6 @@ async function follow(runId, {retry} = {}) {
         const data = chunk.split('\n').filter(l => l.startsWith('data:')).map(l => l.slice(5).trimStart()).join('\n');
         if (!data) continue;
         let e; try { e = JSON.parse(data); } catch { continue; }
-        if (S.thread === thread) window.GEN?.event(e);
         switch (e.type) {
           case 'text': turn.addText(e.content); break;
           case 'reasoning': turn.addReasoning(e.content); break;
@@ -1314,7 +1305,6 @@ async function follow(runId, {retry} = {}) {
   turn.finish();
   S.run = null; S.follower = null; S.ask = null;
   setBusy(false); loadThreads().catch(() => {});
-  window.GEN?.stopped();
   if (S.thread === thread) notifyHidden('Ответ готов', turn.texts.join(' ').slice(0, 140) || S.title);
 }
 

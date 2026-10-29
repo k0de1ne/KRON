@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1014">
+<title>kron</title>
+<link rel="icon" href="/icon.svg">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/ui/app.css">
+<style>
+  /* kron's rescue page: the one screen the agent cannot change. */
+  body { margin: 0; min-height: 100dvh; background: var(--bg); color: var(--fg); font-family: var(--font); }
+  main { max-width: 680px; margin: 0 auto; padding: max(24px, env(safe-area-inset-top)) 16px 32px; display: grid; gap: 16px; }
+  header { display: flex; align-items: center; gap: 10px; }
+  header img { width: 28px; height: 28px; }
+  header h1 { font-size: 18px; margin: 0; flex: 1; }
+  header a { color: var(--accent-text); font-size: 14px; text-decoration: none; }
+  a.btn { text-decoration: none; }
+  form.ask .btn { flex: none; }
+  .lead { color: var(--muted); margin: 0; }
+  form.ask { display: flex; gap: 8px; align-items: flex-end; }
+  form.ask textarea { flex: 1; min-width: 0; min-height: 52px; max-height: 40vh; resize: vertical; font: inherit; padding: 12px 14px; border-radius: var(--r-lg); border: 1px solid var(--line-strong); background: var(--surface); color: var(--fg); }
+  .out { display: grid; gap: 6px; }
+  .out .text { white-space: pre-wrap; line-height: 1.6; }
+  .out .step { font: 13px/1.4 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+  .out .err { color: var(--danger); }
+  .askbox { border: 1px solid var(--line-strong); border-radius: var(--r-lg); padding: 12px; display: grid; gap: 8px; background: var(--surface); }
+  .askbox pre { margin: 0; white-space: pre-wrap; font: 13px/1.4 var(--mono); max-height: 40vh; overflow: auto; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  section h2 { font-size: 14px; color: var(--muted); font-weight: 600; margin: 8px 0; }
+  ul.vers { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+  ul.vers li { display: flex; gap: 8px; align-items: center; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); }
+  ul.vers li span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  ul.vers small { color: var(--muted); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header><img src="/icon.svg" alt=""><h1>kron</h1><a id="open" href="/" hidden>Мой интерфейс →</a></header>
+  <p class="lead" id="lead">Здесь пока ничего нет. Скажите, что вам нужно, — агент сам соберёт интерфейс.</p>
+  <form class="ask" id="ask">
+    <textarea id="msg" rows="2" placeholder="Что сделать?" aria-label="Сообщение агенту"></textarea>
+    <button class="btn primary" id="send">Отправить</button>
+  </form>
+  <div class="out" id="out" aria-live="polite"></div>
+  <section id="token" hidden>
+    <h2>Нужен токен хаба</h2>
+    <form class="row" id="tokenForm"><input class="input" id="tokenInput" placeholder="токен из ~/.kron/config.toml" style="flex:1"><button class="btn">Войти</button></form>
+  </section>
+  <section id="versionsBox" hidden>
+    <h2>Версии интерфейса</h2>
+    <ul class="vers" id="versions"></ul>
+  </section>
+  <section>
+    <h2>Служебное</h2>
+    <div class="row">
+      <a class="btn" href="/kron/app">Вход в подписки, модели и настройки</a>
+      <button class="btn" id="newChat">Новый разговор</button>
+    </div>
+  </section>
+</main>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'})[c]);
+let thread = localStorage.getItem('kron-rescue-thread') || '';
+let wasEmpty = true, run = null;
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {method: opts.method || (opts.json ? 'POST' : 'GET'), headers: opts.json ? {'content-type': 'application/json'} : {}, body: opts.json ? JSON.stringify(opts.json) : undefined});
+  if (r.status === 401) { $('token').hidden = false; throw new Error('нужен токен'); }
+  if (!r.ok) throw new Error(await r.text() || r.statusText);
+  return r.status === 204 ? null : r.json();
+}
+function line(cls, text) { const d = document.createElement('div'); d.className = cls; d.textContent = text; $('out').append(d); return d; }
+
+async function versions() {
+  try {
+    const v = await api('/api/ui/versions');
+    wasEmpty = v.empty;
+    $('open').hidden = v.empty;
+    $('lead').textContent = v.empty
+      ? 'Здесь пока ничего нет. Скажите, что вам нужно, — агент сам соберёт интерфейс.'
+      : 'Это аварийная страница kron. Отсюда можно попросить агента починить интерфейс или вернуть прошлую версию.';
+    $('versionsBox').hidden = !v.versions.length;
+    $('versions').innerHTML = '';
+    v.versions.forEach((x, i) => {
+      const li = document.createElement('li');
+      li.innerHTML = `<span>${esc(x.message)}</span><small>${new Date(x.ts).toLocaleString('ru', {day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'})}</small>`;
+      if (i > 0) {
+        const b = document.createElement('button'); b.className = 'btn sm'; b.textContent = 'Вернуть';
+        b.onclick = async () => { try { await api('/api/ui/restore', {json: {id: x.id}}); location.href = '/'; } catch (e) { alert(e.message); } };
+        li.append(b);
+      } else li.append(Object.assign(document.createElement('small'), {textContent: 'сейчас'}));
+      $('versions').append(li);
+    });
+  } catch {}
+}
+
+$('ask').onsubmit = async e => {
+  e.preventDefault();
+  const text = $('msg').value.trim();
+  if (!text || run) return;
+  $('out').innerHTML = '';
+  line('text you', '› ' + text);
+  $('msg').value = ''; $('send').disabled = true;
+  try {
+    const r = await api('/api/runs', {json: {thread, text, mode: 'ui', interactive: true}});
+    thread = r.thread; localStorage.setItem('kron-rescue-thread', thread);
+    follow(r.run);
+  } catch (err) { line('err', err.message); $('send').disabled = false; }
+};
+$('msg').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); $('ask').requestSubmit(); } };
+
+function follow(id) {
+  run = id;
+  let text = null;
+  const firstBuild = wasEmpty;
+  const es = new EventSource(`/api/runs/${id}/events`);
+  // The first interface is ready: go to it.
+  const end = () => { es.close(); run = null; $('send').disabled = false; versions().then(() => { if (firstBuild && !wasEmpty) location.href = '/'; }); };
+  es.onmessage = m => {
+    const e = JSON.parse(m.data);
+    if (e.type === 'text') { text ??= line('text', ''); text.textContent += e.content; }
+    else if (e.type === 'tool_start' && !e.parent) { text = null; line('step', '· ' + e.name + ' ' + String(e.args || '').slice(0, 120)); }
+    else if (e.type === 'ask') askBox(id, e);
+    else if (e.type === 'error') { line('err', e.message); end(); }
+    else if (e.type === 'done') end();
+  };
+  es.onerror = () => { if (run === id) { line('err', 'связь с хабом прервалась'); end(); } };
+}
+
+function askBox(id, a) {
+  const box = document.createElement('div'); box.className = 'askbox';
+  const answer = async v => { box.remove(); try { await api(`/api/runs/${id}/answer`, {json: {ask: a.id, answer: v}}); } catch (e) { line('err', e.message); } };
+  const b = (label, v, cls = 'btn sm') => Object.assign(document.createElement('button'), {className: cls, textContent: label, onclick: () => answer(v)});
+  const row = document.createElement('div'); row.className = 'row';
+  if (a.kind === 'approval') {
+    box.innerHTML = `<b>Агент просит разрешения: ${esc(a.name)}</b><pre>${esc(a.args)}</pre>`;
+    row.append(b('Разрешить', 'allow', 'btn sm primary'), b('Разрешать до конца ответа', 'allow_all'), b('Запретить', 'deny'));
+  } else {
+    box.innerHTML = `<b>${esc(a.question)}</b>`;
+    (a.options || []).forEach(o => row.append(b(o, o)));
+    const inp = Object.assign(document.createElement('input'), {className: 'input', placeholder: 'Свой ответ'});
+    inp.onkeydown = e => { if (e.key === 'Enter' && inp.value.trim()) answer(inp.value.trim()); };
+    row.append(inp);
+  }
+  box.append(row); $('out').append(box);
+}
+
+$('newChat').onclick = () => { thread = ''; localStorage.removeItem('kron-rescue-thread'); $('out').innerHTML = ''; $('msg').focus(); };
+$('tokenForm').onsubmit = e => { e.preventDefault(); location.href = '/kron/?token=' + encodeURIComponent($('tokenInput').value.trim()); };
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+versions();
+if (thread) api('/api/threads/' + thread + '/run').then(r => { if (r?.run) follow(r.run); }).catch(() => {});
+$('msg').focus();
+</script>
+</body>
+</html>

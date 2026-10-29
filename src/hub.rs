@@ -130,7 +130,16 @@ pub async fn serve(cfg: Arc<Config>, workdir: std::path::PathBuf) -> Result<()> 
         logins: Default::default(),
     });
     let app = Router::new()
-        .route("/", get(|State(hub): State<Shared>, headers: HeaderMap| async move { asset(&hub, "/", &headers) }))
+        .route("/kron", get(kernel))
+        .route("/kron/", get(kernel))
+        .route("/kron/confirm", get(confirm_page))
+        .route("/kron/app", get(service_app))
+        .route(
+            "/kron/sdk.js",
+            get(|| async {
+                ([("content-type", "text/javascript; charset=utf-8"), ("cache-control", "no-cache")], SDK_JS)
+            }),
+        )
         .route(
             "/ui/*file",
             get(|State(hub): State<Shared>, Path(file): Path<String>, headers: HeaderMap| async move {
@@ -149,22 +158,14 @@ pub async fn serve(cfg: Arc<Config>, workdir: std::path::PathBuf) -> Result<()> 
         .route("/api/runs/:id/events", get(run_events))
         .route("/api/runs/:id/cancel", post(cancel_run))
         .route("/api/runs/:id/answer", post(answer_run))
-        .route("/api/surfaces", get(surface_list))
-        .route("/api/surfaces/:id", get(surface_get).delete(surface_delete))
-        .route("/api/surfaces/:id/data", post(surface_data))
-        .route("/api/surfaces/:id/undo", post(surface_undo))
-        .route("/api/surfaces/:id/versions", get(surface_versions))
-        .route("/api/surfaces/:id/signal", post(surface_signal))
-        .route("/api/surfaces/:id/exec", post(surface_exec))
-        .route("/api/surfaces/:id/live", post(surface_live))
-        .route("/api/surfaces/:id/approve", post(surface_approve))
-        .route("/api/surfaces/:id/layout", post(surface_layout))
-        .route("/api/genui/profile", get(genui_profile))
-        .route("/api/genui/match", get(genui_match))
-        .route("/api/genui/notes", post(genui_note_add))
-        .route("/api/genui/notes/:id", axum::routing::delete(genui_note_delete))
-        .route("/api/genui/templates/:id", axum::routing::delete(genui_template_delete))
-        .route("/api/genui/reset", post(genui_reset))
+        .route("/api/ui/versions", get(ui_versions))
+        .route("/api/ui/restore", post(ui_restore))
+        .route("/api/ui/data", get(ui_data_keys))
+        .route("/api/ui/data/:key", get(ui_data_get).put(ui_data_put).delete(ui_data_delete))
+        .route("/api/locks", get(locks_list).post(lock_add))
+        .route("/api/locks/password", post(lock_password))
+        .route("/api/locks/:id", axum::routing::delete(lock_remove))
+        .route("/api/presence/:id", get(presence_get).post(presence_confirm))
         .route("/api/files", post(files).layer(DefaultBodyLimit::max(48 << 20)))
         .route("/raw/:token/:node/*path", get(raw_file))
         .route("/manifest.webmanifest", get(manifest))
@@ -189,6 +190,8 @@ pub async fn serve(cfg: Arc<Config>, workdir: std::path::PathBuf) -> Result<()> 
         .route("/api/nodes/:name/hello", post(node_hello))
         .route("/api/nodes/:name/poll", get(node_poll))
         .route("/api/nodes/:name/result", post(node_result))
+        .fallback(get(own_ui))
+        .layer(axum::middleware::from_fn_with_state(hub.clone(), lock_gate))
         .with_state(hub.clone());
     let listener = tokio::net::TcpListener::bind(&listen)
         .await
@@ -213,7 +216,16 @@ fn authorized(hub: &Hub, headers: &HeaderMap, q: &TokenQuery) -> bool {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(String::from)
-        .or_else(|| q.token.clone());
+        .or_else(|| q.token.clone())
+        .or_else(|| {
+            // Set by the hub on the person's pages (see remember_token).
+            headers
+                .get_all("cookie")
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .flat_map(|v| v.split(';'))
+                .find_map(|c| c.trim().strip_prefix("kron_token=").map(String::from))
+        });
     given.as_deref() == Some(expected)
 }
 
@@ -697,16 +709,16 @@ async fn manifest() -> Response {
     ([("content-type", "application/manifest+json")], m.to_string()).into_response()
 }
 
-/// Lets the web UI install as an app (Android / desktop Chrome) and open without
-/// a connection: the page and its files come from the network when possible,
-/// from the last copy otherwise. Never caches the API.
+/// Lets the interface install as an app (Android / desktop Chrome) and open
+/// without a connection: its pages and files come from the network when
+/// possible, from the last copy otherwise. Never caches the API.
 const SW_JS: &str = r#"const CACHE = 'kron-ui';
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== location.origin) return;
-  if (url.pathname !== '/' && !url.pathname.startsWith('/ui/') && !url.pathname.startsWith('/icon')) return;
+  if (/^\/(api|raw)\//.test(url.pathname) || url.pathname.startsWith('/kron/confirm')) return;
   e.respondWith(fetch(e.request).then(r => {
     if (r.ok) { const copy = r.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); }
     return r;
@@ -759,375 +771,314 @@ async fn run_events(
     Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
 }
 
-// ── Generated interfaces ─────────────────────────────────────────────────────
+// ── The person's interface (the agent writes it) and the kernel ──────────────
 
-async fn surface_list(State(hub): State<Shared>, headers: HeaderMap, Query(q): Query<TokenQuery>) -> Response {
-    guard!(hub, headers, q);
-    let cfg = hub.cfg();
-    Json(crate::genui::surfaces(&cfg).list()).into_response()
-}
+const KERNEL_HTML: &str = include_str!("kernel/index.html");
+const CONFIRM_HTML: &str = include_str!("kernel/confirm.html");
+const SDK_JS: &str = include_str!("kernel/sdk.js");
 
-async fn surface_get(
-    State(hub): State<Shared>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    Query(q): Query<TokenQuery>,
-) -> Response {
-    guard!(hub, headers, q);
-    match crate::genui::surfaces(&hub.cfg()).get(&id) {
-        Ok(s) => Json(s.to_client()).into_response(),
-        Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
-    }
-}
-
-async fn surface_delete(
-    State(hub): State<Shared>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    Query(q): Query<TokenQuery>,
-) -> Response {
-    guard!(hub, headers, q);
-    let surfaces = crate::genui::surfaces(&hub.cfg());
-    if let Ok(s) = surfaces.get(&id)
-        && crate::genui::thread_surface(&hub.store, &s.thread).as_deref() == Some(id.as_str())
+/// `?token=` on a page: remember it in a cookie, so the interface's own pages,
+/// scripts and API calls work without carrying the token.
+fn remember_token(hub: &Hub, q: &TokenQuery, mut resp: Response) -> Response {
+    let expected = hub.cfg().hub.token.clone().filter(|t| !t.is_empty());
+    if let (Some(t), Some(e)) = (&q.token, expected)
+        && *t == e
+        && let Ok(v) = format!("kron_token={t}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000").parse()
     {
-        hub.store.set_meta(&s.thread, "surface", Value::Null).ok();
+        resp.headers_mut().insert("set-cookie", v);
     }
-    match surfaces.delete(&id) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => err(e),
-    }
+    resp
 }
 
-/// The person changed values in the interface: {patches: [{path, value}]}.
-async fn surface_data(
-    State(hub): State<Shared>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    Query(q): Query<TokenQuery>,
-    Json(body): Json<Value>,
-) -> Response {
-    guard!(hub, headers, q);
-    let patches: Vec<(String, Option<Value>)> = body["patches"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .map(|p| {
-                    (p["path"].as_str().unwrap_or("").to_string(), p.get("value").filter(|v| !v.is_null()).cloned())
-                })
-                .filter(|(p, _)| !p.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
-    if patches.is_empty() {
-        return err("no patches");
-    }
-    match crate::genui::surfaces(&hub.cfg()).patch_data(&id, &patches, "user") {
-        Ok(s) => Json(json!({"version": s.version, "updated": s.updated})).into_response(),
-        Err(e) => err(format!("{e:#}")),
-    }
-}
-
-/// Undo the last change, or go back to {version}.
-async fn surface_undo(
-    State(hub): State<Shared>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    Query(q): Query<TokenQuery>,
-    Json(body): Json<Value>,
-) -> Response {
-    guard!(hub, headers, q);
-    match crate::genui::surfaces(&hub.cfg()).restore(&id, body["version"].as_u64()) {
-        Ok(s) => Json(s.to_client()).into_response(),
-        Err(e) => err(format!("{e:#}")),
-    }
-}
-
-async fn surface_versions(
-    State(hub): State<Shared>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    Query(q): Query<TokenQuery>,
-) -> Response {
-    guard!(hub, headers, q);
-    let list: Vec<Value> = crate::genui::surfaces(&hub.cfg())
-        .versions(&id)
-        .iter()
-        .rev()
-        .map(|v| json!({"version": v.version, "ts": v.ts, "by": v.by, "note": v.note, "title": v.title}))
-        .collect();
-    Json(list).into_response()
-}
-
-/// How the person uses the interface: {kind: open | interact | like | dislike | pin | unpin, used: [component types]}.
-async fn surface_signal(
-    State(hub): State<Shared>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    Query(q): Query<TokenQuery>,
-    Json(body): Json<Value>,
-) -> Response {
-    guard!(hub, headers, q);
-    let cfg = hub.cfg();
-    let kind = body["kind"].as_str().unwrap_or("interact").to_string();
-    let used: Vec<String> = body["used"]
-        .as_array()
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).take(50).collect())
-        .unwrap_or_default();
-    let count = body["count"].as_u64().unwrap_or(used.len().max(1) as u64).min(100);
-    let s = crate::genui::surfaces(&cfg).update(&id, |s| match kind.as_str() {
-        "open" => s.stats.opens += 1,
-        "like" => s.stats.likes += 1,
-        "dislike" => s.stats.dislikes += 1,
-        "pin" => s.pinned = true,
-        "unpin" => s.pinned = false,
-        _ => {
-            s.stats.interactions += count;
-            for u in &used {
-                *s.stats.used.entry(u.clone()).or_default() += 1;
-            }
-        }
-    });
-    match s {
-        Ok(s) => {
-            if kind != "open" && kind != "unpin" {
-                crate::genui::memory(&cfg).signal(&s, &used, &kind).ok();
-            }
-            Json(json!({"pinned": s.pinned, "stats": s.stats})).into_response()
-        }
-        Err(e) => err(format!("{e:#}")),
-    }
-}
-
-/// A tool run straight from the interface (a button or the terminal), on the
-/// thread's machine and with its permission rules: read-only threads only
-/// look; outside "full" access, anything that changes things needs the
-/// person's confirmation (`confirmed`, given by the UI after showing it).
-async fn surface_exec(
-    State(hub): State<Shared>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    Query(q): Query<TokenQuery>,
-    Json(body): Json<Value>,
-) -> Response {
-    guard!(hub, headers, q);
-    let cfg = hub.cfg();
-    let surfaces = crate::genui::surfaces(&cfg);
-    let s = match surfaces.get(&id) {
-        Ok(s) => s,
-        Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
-    };
-    let tool = body["tool"].as_str().unwrap_or("");
-    let args = body["args"].clone();
-    if !["shell", "read_file", "list_dir", "grep_files"].contains(&tool) {
-        return err(format!("'{tool}' cannot run from an interface"));
-    }
-    let settings = hub.store.meta(&s.thread)["settings"].clone();
-    if let Some(r) = ui_refusal(&settings, tool, &args, body["confirmed"] == true, "needs confirmation") {
-        return r;
-    }
-    let exec = match hub.executor(settings["node"].as_str(), settings["cwd"].as_str(), false).await {
-        Ok(e) => e,
-        Err(e) => return err(format!("{e:#}")),
-    };
-    let started = std::time::Instant::now();
-    let output = exec.run_tool(tool, &args).await;
-    let output = crate::types::preview(&output, 20_000);
-    let ok = if tool == "shell" { output.starts_with("Exit code: 0") } else { !output.starts_with("error") };
-    surfaces
-        .update(&id, |s| {
-            s.audit.push(json!({"ts": crate::types::now_ms(), "tool": tool, "args": args, "ok": ok,
-                "ms": started.elapsed().as_millis() as u64, "by": "user"}))
-        })
-        .ok();
-    Json(json!({"output": output, "ok": ok})).into_response()
-}
-
-/// Why a tool may not run from an interface of a thread with these settings,
-/// if it may not: read-only threads only look; outside "full" access, anything
-/// that changes things needs the person's consent (`allowed`).
-fn ui_refusal(settings: &Value, tool: &str, args: &Value, allowed: bool, ask: &'static str) -> Option<Response> {
-    let access = crate::agent::Access::parse(settings["access"].as_str().unwrap_or("ask"));
-    let changes = crate::tools::changes_things(tool, args);
-    if changes && access == crate::agent::Access::ReadOnly {
-        return Some((StatusCode::FORBIDDEN, "read-only: this interface cannot run commands").into_response());
-    }
-    if changes && access != crate::agent::Access::Full && !allowed {
-        return Some((StatusCode::CONFLICT, ask).into_response());
-    }
-    None
-}
-
-/// Run one live source of an interface and put its result into the data:
-/// {source, tz} (tz: the browser's offset from UTC in minutes, for time labels).
-/// A shell source runs only once the person approved its command (409 "needs approval").
-async fn surface_live(
-    State(hub): State<Shared>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    Query(q): Query<TokenQuery>,
-    Json(body): Json<Value>,
-) -> Response {
-    guard!(hub, headers, q);
-    let cfg = hub.cfg();
-    let surfaces = crate::genui::surfaces(&cfg);
-    let s = match surfaces.get(&id) {
-        Ok(s) => s,
-        Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
-    };
-    let Some(src) = s.sources.iter().find(|x| x["id"] == body["source"]).cloned() else {
-        return (StatusCode::NOT_FOUND, "no such source").into_response();
-    };
-    let tool = src["tool"]["name"].as_str().unwrap_or("");
-    let args = &src["tool"]["args"];
-    let settings = hub.store.meta(&s.thread)["settings"].clone();
-    let approved = s.approved.contains(&crate::genui::surface::source_key(&src));
-    if let Some(r) = ui_refusal(&settings, tool, args, approved, "needs approval") {
-        return r;
-    }
-    let exec = match hub.executor(settings["node"].as_str(), settings["cwd"].as_str(), false).await {
-        Ok(e) => e,
-        Err(e) => return err(format!("{e:#}")),
-    };
-    let output = exec.run_tool(tool, args).await;
-    let parsed = crate::genui::surface::parse_output(tool, src["parse"].as_str().unwrap_or("text"), &output);
-    let value = parsed.and_then(|v| surfaces.write_live(&id, &src, v, &clock(body["tz"].as_i64().unwrap_or(0))));
-    match value {
-        Ok(v) => Json(json!({"ok": true, "path": src["target"], "value": v})).into_response(),
-        Err(e) => Json(json!({"ok": false, "error": format!("{e:#}")})).into_response(),
-    }
-}
-
-/// "HH:MM:SS" now, at `tz` minutes behind UTC (as JavaScript's getTimezoneOffset).
-fn clock(tz: i64) -> String {
-    let secs = (crate::types::now_ms() / 1000 - tz.clamp(-1440, 1440) * 60).rem_euclid(86_400);
-    format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
-}
-
-/// The person allows these live sources to run their commands: {sources: [ids]}.
-async fn surface_approve(
-    State(hub): State<Shared>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    Query(q): Query<TokenQuery>,
-    Json(body): Json<Value>,
-) -> Response {
-    guard!(hub, headers, q);
-    let ids: Vec<String> =
-        body["sources"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect();
-    match crate::genui::surfaces(&hub.cfg()).approve(&id, &ids) {
-        Ok(s) => Json(json!({"approved": s.approved.len()})).into_response(),
-        Err(e) => err(format!("{e:#}")),
-    }
-}
-
-/// The person rearranges the interface: {op: "move" | "hide", id, dir: -1 | 1}.
-async fn surface_layout(
-    State(hub): State<Shared>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    Query(q): Query<TokenQuery>,
-    Json(body): Json<Value>,
-) -> Response {
-    guard!(hub, headers, q);
-    let op = body["op"].as_str().unwrap_or("");
-    let target = body["id"].as_str().unwrap_or("");
-    match crate::genui::surfaces(&hub.cfg()).layout(&id, op, target, body["dir"].as_i64().unwrap_or(1)) {
-        Ok(s) => Json(s.to_client()).into_response(),
-        Err(e) => err(format!("{e:#}")),
-    }
-}
-
-async fn genui_profile(State(hub): State<Shared>, headers: HeaderMap, Query(q): Query<TokenQuery>) -> Response {
-    guard!(hub, headers, q);
-    Json(crate::genui::memory(&hub.cfg()).export()).into_response()
-}
-
-#[derive(Deserialize, Default)]
-struct MatchQuery {
-    token: Option<String>,
-    q: Option<String>,
-}
-
-/// While the person types on the start screen: the kind of task and earlier
-/// interfaces that fit it, to reopen instead of building again.
-async fn genui_match(State(hub): State<Shared>, headers: HeaderMap, Query(mq): Query<MatchQuery>) -> Response {
-    guard!(hub, headers, TokenQuery { token: mq.token.clone() });
-    use crate::genui::profile::{classify, keywords, similarity};
-    let text = mq.q.unwrap_or_default();
-    let (intent, confidence) = classify(&text);
-    let kw = keywords(&text);
-    let cfg = hub.cfg();
-    let surfaces = crate::genui::surfaces(&cfg);
-    let mut hits: Vec<(f32, Value)> = surfaces
-        .list()
-        .into_iter()
-        .filter_map(|sum| {
-            let s = surfaces.get(&sum.id).ok()?;
-            let sim = similarity(&kw, &keywords(&format!("{} {}", s.title, s.request)));
-            (sim >= 0.5).then(|| (sim + if s.intent == intent { 0.2 } else { 0.0 }, json!(sum)))
-        })
-        .collect();
-    hits.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let template = crate::genui::memory(&cfg)
-        .best_template(&intent, &text)
-        .map(|(t, fit)| json!({"id": t.id, "title": t.title, "fit": fit}));
-    Json(json!({"intent": intent, "confidence": confidence, "surfaces": hits.into_iter().take(3).map(|h| h.1).collect::<Vec<_>>(), "template": template}))
+fn kernel_page(body: &'static str) -> Response {
+    (
+        [
+            ("content-type", "text/html; charset=utf-8"),
+            ("cache-control", "no-cache"),
+            // kron's own pages: the interface cannot frame them or reach into them.
+            ("x-frame-options", "DENY"),
+            ("content-security-policy", "frame-ancestors 'none'"),
+            ("cross-origin-opener-policy", "same-origin"),
+        ],
+        body,
+    )
         .into_response()
 }
 
-async fn genui_note_add(
+async fn kernel(State(hub): State<Shared>, Query(q): Query<TokenQuery>) -> Response {
+    remember_token(&hub, &q, kernel_page(KERNEL_HTML))
+}
+
+async fn confirm_page() -> Response {
+    kernel_page(CONFIRM_HTML)
+}
+
+async fn service_app(State(hub): State<Shared>, headers: HeaderMap, Query(q): Query<TokenQuery>) -> Response {
+    remember_token(&hub, &q, asset(&hub, "/", &headers))
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let Ok(x) = u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or(""), 16)
+        {
+            out.push(x);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+fn content_type(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" | "map" => "application/json",
+        "webmanifest" => "application/manifest+json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "wasm" => "application/wasm",
+        "mp3" => "audio/mpeg",
+        "mp4" => "video/mp4",
+        "txt" | "md" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Every path that is not the hub's own: the interface's files (a folder: its
+/// index.html; a path without an extension that is not a file: index.html, for
+/// apps with their own routing). Until there is an interface, the rescue page.
+async fn own_ui(
+    State(hub): State<Shared>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !authorized(&hub, &headers, &q) {
+        return kernel_page(KERNEL_HTML);
+    }
+    let dir = crate::face::dir(&hub.cfg());
+    let rel = percent_decode(uri.path().trim_start_matches('/'));
+    let Ok(mut file) = crate::face::inside(&dir, &rel) else { return StatusCode::NOT_FOUND.into_response() };
+    if rel.split('/').any(|s| s.starts_with(".git")) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if file.is_dir() {
+        file = file.join("index.html");
+    }
+    if !file.is_file() && std::path::Path::new(&rel).extension().is_none() {
+        file = dir.join("index.html");
+    }
+    let resp = match std::fs::read(&file) {
+        Ok(bytes) => ([("content-type", content_type(&file)), ("cache-control", "no-cache")], bytes).into_response(),
+        Err(_) if file == dir.join("index.html") => kernel_page(KERNEL_HTML),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    };
+    remember_token(&hub, &q, resp)
+}
+
+async fn ui_versions(State(hub): State<Shared>, headers: HeaderMap, Query(q): Query<TokenQuery>) -> Response {
+    guard!(hub, headers, q);
+    let dir = crate::face::dir(&hub.cfg());
+    Json(json!({"empty": !dir.join("index.html").exists(), "versions": crate::face::versions(&dir)})).into_response()
+}
+
+async fn ui_restore(
     State(hub): State<Shared>,
     headers: HeaderMap,
     Query(q): Query<TokenQuery>,
     Json(body): Json<Value>,
 ) -> Response {
     guard!(hub, headers, q);
-    match body["text"].as_str().filter(|t| !t.trim().is_empty()) {
-        Some(t) => match crate::genui::memory(&hub.cfg()).remember(t) {
-            Ok(n) => Json(json!(n)).into_response(),
-            Err(e) => err(e),
-        },
-        None => err("empty note"),
+    match crate::face::restore(&crate::face::dir(&hub.cfg()), body["id"].as_str().unwrap_or("")) {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => err(format!("{e:#}")),
     }
 }
 
-async fn genui_note_delete(
+async fn ui_data_keys(State(hub): State<Shared>, headers: HeaderMap, Query(q): Query<TokenQuery>) -> Response {
+    guard!(hub, headers, q);
+    Json(crate::face::data_keys(&crate::face::data_dir(&hub.cfg()))).into_response()
+}
+
+async fn ui_data_get(
     State(hub): State<Shared>,
-    Path(id): Path<String>,
+    Path(key): Path<String>,
     headers: HeaderMap,
     Query(q): Query<TokenQuery>,
 ) -> Response {
     guard!(hub, headers, q);
-    match crate::genui::memory(&hub.cfg()).forget(&id) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => err(e),
+    let file = match crate::face::data_file(&crate::face::data_dir(&hub.cfg()), &key) {
+        Ok(f) => f,
+        Err(e) => return err(e),
+    };
+    match std::fs::read_to_string(file) {
+        Ok(text) => ([("content-type", "application/json")], text).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "no such key").into_response(),
     }
 }
 
-async fn genui_template_delete(
+async fn ui_data_put(
     State(hub): State<Shared>,
-    Path(id): Path<String>,
+    Path(key): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    Json(value): Json<Value>,
+) -> Response {
+    guard!(hub, headers, q);
+    let write = || -> Result<()> {
+        let file = crate::face::data_file(&crate::face::data_dir(&hub.cfg()), &key)?;
+        let tmp = file.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_string(&value)?)?;
+        std::fs::rename(tmp, file)?;
+        Ok(())
+    };
+    match write() {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+async fn ui_data_delete(
+    State(hub): State<Shared>,
+    Path(key): Path<String>,
     headers: HeaderMap,
     Query(q): Query<TokenQuery>,
 ) -> Response {
     guard!(hub, headers, q);
-    match crate::genui::memory(&hub.cfg()).delete_template(&id) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+    match crate::face::data_file(&crate::face::data_dir(&hub.cfg()), &key) {
+        Ok(f) => {
+            std::fs::remove_file(f).ok();
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => err(e),
     }
 }
 
-async fn genui_reset(
+/// Locked calls wait for the person (423 with a challenge to confirm on
+/// `/kron/confirm`); a confirmed one goes through once.
+async fn lock_gate(State(hub): State<Shared>, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let path = req.uri().path().to_string();
+    if path.starts_with("/kron") || path.starts_with("/api/presence/") {
+        return next.run(req).await;
+    }
+    let locks = crate::lock::Locks::new(&hub.cfg());
+    let method = req.method().as_str().to_string();
+    let Some(lock) = locks.find(&method, &path) else { return next.run(req).await };
+    let token =
+        req.uri().query().and_then(|qs| qs.split('&').find_map(|kv| kv.strip_prefix("token=").map(percent_decode)));
+    if !authorized(&hub, req.headers(), &TokenQuery { token }) {
+        return (StatusCode::UNAUTHORIZED, "bad or missing token").into_response();
+    }
+    let full = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or(path);
+    let (parts, body) = req.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, 64 << 20).await else { return err("the request is too large") };
+    match locks.wait(&lock, &method, &full, &bytes) {
+        None => next.run(axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes))).await,
+        Some(c) => (
+            StatusCode::LOCKED,
+            Json(json!({"locked": c.title, "challenge": c.id, "confirm": format!("/kron/confirm?c={}", c.id)})),
+        )
+            .into_response(),
+    }
+}
+
+async fn locks_list(State(hub): State<Shared>, headers: HeaderMap, Query(q): Query<TokenQuery>) -> Response {
+    guard!(hub, headers, q);
+    let locks = crate::lock::Locks::new(&hub.cfg());
+    Json(json!({"password": locks.has_password(), "locks": locks.list()})).into_response()
+}
+
+async fn lock_add(
     State(hub): State<Shared>,
     headers: HeaderMap,
     Query(q): Query<TokenQuery>,
     Json(body): Json<Value>,
 ) -> Response {
     guard!(hub, headers, q);
-    match crate::genui::memory(&hub.cfg()).reset(body["notes"] == true) {
+    let s = |k: &str| body[k].as_str().unwrap_or("").to_string();
+    match crate::lock::Locks::new(&hub.cfg()).add(&s("title"), &s("method"), &s("path")) {
+        Ok(l) => Json(l).into_response(),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// Reaches here only after the person confirmed (see `lock_gate`).
+async fn lock_remove(
+    State(hub): State<Shared>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    guard!(hub, headers, q);
+    let locks = crate::lock::Locks::new(&hub.cfg());
+    let result = if id == "password" { Err(anyhow::anyhow!("not a lock")) } else { locks.remove(&id) };
+    match result {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => err(e),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// A new password: {password}. Locked once there is one; the first one is set on the confirm page.
+async fn lock_password(
+    State(hub): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    Json(body): Json<Value>,
+) -> Response {
+    guard!(hub, headers, q);
+    let locks = crate::lock::Locks::new(&hub.cfg());
+    if !locks.has_password() {
+        return err("there is no password yet: it is set at the first confirmation");
+    }
+    match locks.set_password(body["password"].as_str().unwrap_or("")) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+async fn presence_get(
+    State(hub): State<Shared>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    guard!(hub, headers, q);
+    let locks = crate::lock::Locks::new(&hub.cfg());
+    match locks.challenge(&id) {
+        Some(c) => {
+            Json(json!({"challenge": c, "password": locks.has_password(), "approved": c.approved})).into_response()
+        }
+        None => (StatusCode::NOT_FOUND, "this confirmation has expired").into_response(),
+    }
+}
+
+async fn presence_confirm(
+    State(hub): State<Shared>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    Json(body): Json<Value>,
+) -> Response {
+    guard!(hub, headers, q);
+    match crate::lock::Locks::new(&hub.cfg()).confirm(&id, body["password"].as_str().unwrap_or("")) {
+        Ok(()) => Json(json!({"approved": true})).into_response(),
+        Err(e) => (StatusCode::FORBIDDEN, format!("{e:#}")).into_response(),
     }
 }
 
@@ -1242,8 +1193,6 @@ const ASSETS: &[(&str, &str, &str)] = &[
     ("/", "text/html; charset=utf-8", include_str!("ui/index.html")),
     ("/ui/app.css", "text/css; charset=utf-8", include_str!("ui/app.css")),
     ("/ui/app.js", "text/javascript; charset=utf-8", include_str!("ui/app.js")),
-    ("/ui/gen.css", "text/css; charset=utf-8", include_str!("ui/gen.css")),
-    ("/ui/gen.js", "text/javascript; charset=utf-8", include_str!("ui/gen.js")),
     ("/ui/vendor/marked-18.1.2.js", "text/javascript; charset=utf-8", include_str!("ui/vendor/marked-18.1.2.js")),
     ("/ui/vendor/purify-3.4.17.js", "text/javascript; charset=utf-8", include_str!("ui/vendor/purify-3.4.17.js")),
     (

@@ -1,6 +1,6 @@
-# Интерфейс kron
+# Служебный режим kron
 
-Веб-интерфейс — это `src/ui/`: `index.html` (разметка и иконки), `app.css` (дизайн-система), `app.js` (логика), `gen.js` и `gen.css` (интерфейсы под задачу, см. [genui.md](genui.md)), `vendor/` (marked, DOMPurify, highlight.js). Хаб встраивает всё это в бинарник, поэтому интерфейс работает без интернета: на телефоне с локальной моделью, в самолёте, за Tailscale. Сборки нет: правите файл, `cargo build`, обновляете страницу.
+Свой интерфейс человека пишет агент (см. [face.md](face.md)). Здесь — служебный режим `/kron/app`: вход в подписки, модели, настройки и обычный чат с агентом, на случай если своего интерфейса ещё нет или он сломан. Это `src/ui/`: `index.html` (разметка и иконки), `app.css` (дизайн-система, её же используют страницы ядра), `app.js` (логика), `vendor/` (marked, DOMPurify, highlight.js). Хаб встраивает всё это в бинарник, поэтому интерфейс работает без интернета: на телефоне с локальной моделью, в самолёте, за Tailscale. Сборки нет: правите файл, `cargo build`, обновляете страницу.
 
 ## На чём основаны решения
 
@@ -58,7 +58,7 @@
 
 - `GET /api/threads?q=` — чаты с полями `running`, `waiting`, `forked_from`, `snippet` (при поиске).
 - `GET /api/threads/:name/meta`, `POST /api/threads/:name/title`, `POST /api/threads/:name/fork {upto}`.
-- `POST /api/runs` принимает `mode` = `ui` (интерфейс под задачу), `agent`, `chat`, `web`; API интерфейсов — в [genui.md](genui.md).
+- `POST /api/runs` принимает `mode` = `ui` (агент, который пишет интерфейс), `agent`, `chat`, `web`; API интерфейса и замков — в [face.md](face.md).
 - `POST /api/runs` принимает ещё `access` (`full` / `ask` / `read`), `effort`, `cwd`, `interactive`.
 - `POST /api/runs/:id/answer {ask, answer}` — ответ на подтверждение (`allow`, `allow_all`, `deny`, `deny: причина`) или вопрос.
 - `POST /api/files {node, cwd, op, path, data}` — `list`, `read`, `write`, `mkdir`, `stat` на любой машине.

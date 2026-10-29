@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>kron · подтверждение</title>
+<link rel="icon" href="/icon.svg">
+<link rel="stylesheet" href="/ui/app.css">
+<style>
+  /* kron's own confirmation page: served so the interface cannot frame it or reach into it. */
+  body { margin: 0; min-height: 100dvh; display: grid; place-items: center; background: var(--bg); color: var(--fg); font-family: var(--font); }
+  main { width: min(440px, calc(100vw - 32px)); display: grid; gap: 14px; padding: 24px 0; }
+  .who { display: flex; gap: 10px; align-items: center; color: var(--muted); font-size: 14px; }
+  .who img { width: 24px; height: 24px; }
+  h1 { font-size: 20px; margin: 0; }
+  .req { border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); padding: 12px; display: grid; gap: 6px; }
+  .req code { font: 13px/1.4 var(--mono); overflow-wrap: anywhere; }
+  .req pre { margin: 0; max-height: 30vh; overflow: auto; white-space: pre-wrap; font: 12px/1.4 var(--mono); color: var(--muted); }
+  form { display: grid; gap: 8px; }
+  .msg { min-height: 20px; font-size: 14px; }
+  .msg.err { color: var(--danger); } .msg.ok { color: var(--ok); }
+  .hint { color: var(--muted); font-size: 13px; margin: 0; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <div class="who"><img src="/icon.svg" alt="">Страница kron, не вашего интерфейса</div>
+  <h1 id="title">Подтверждение</h1>
+  <div class="req" id="req" hidden><code id="what"></code><pre id="body"></pre></div>
+  <form id="form" hidden>
+    <p class="hint" id="hint"></p>
+    <input class="input" id="pw" type="password" autocomplete="current-password" aria-label="Пароль">
+    <input class="input" id="pw2" type="password" autocomplete="new-password" placeholder="Повторите пароль" aria-label="Повторите пароль" hidden>
+    <button class="btn primary" id="ok">Подтвердить</button>
+    <button class="btn" type="button" id="cancel">Отмена</button>
+  </form>
+  <div class="msg" id="msg" role="status"></div>
+</main>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const c = new URLSearchParams(location.search).get('c') || '';
+let first = false;
+const leave = () => { window.close(); setTimeout(() => { if (history.length > 1) history.back(); else location.href = '/'; }, 300); };
+const say = (t, cls = '') => { $('msg').textContent = t; $('msg').className = 'msg ' + cls; };
+
+fetch('/api/presence/' + encodeURIComponent(c)).then(async r => {
+  if (!r.ok) throw new Error(await r.text());
+  const d = await r.json();
+  $('title').textContent = d.challenge.title || 'Подтверждение';
+  $('what').textContent = d.challenge.method + ' ' + d.challenge.path;
+  $('body').textContent = d.challenge.body || '';
+  $('body').hidden = !d.challenge.body;
+  $('req').hidden = false;
+  if (d.approved) { say('Уже подтверждено.', 'ok'); return leave(); }
+  first = !d.password;
+  $('hint').textContent = first
+    ? 'Это первая защищённая операция. Придумайте пароль (от 6 символов): дальше kron будет спрашивать его здесь, на своей странице. Агент его не узнает.'
+    : 'Введите ваш пароль kron. Подтверждение пропустит ровно это действие, один раз.';
+  $('pw').placeholder = first ? 'Новый пароль' : 'Пароль';
+  $('pw2').hidden = !first;
+  $('form').hidden = false;
+  $('pw').focus();
+}).catch(e => say(e.message || 'Подтверждение не найдено', 'err'));
+
+$('form').onsubmit = async e => {
+  e.preventDefault();
+  if (first && $('pw').value !== $('pw2').value) return say('Пароли не совпадают', 'err');
+  $('ok').disabled = true;
+  const r = await fetch('/api/presence/' + encodeURIComponent(c), {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({password: $('pw').value})});
+  $('pw').value = $('pw2').value = '';
+  $('ok').disabled = false;
+  if (!r.ok) return say(await r.text(), 'err');
+  $('form').hidden = true;
+  say('Подтверждено. Возвращаю…', 'ok');
+  leave();
+};
+$('cancel').onclick = leave;
+</script>
+</body>
+</html>
